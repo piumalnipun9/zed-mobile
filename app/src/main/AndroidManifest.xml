@@ -1,0 +1,23 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- HTTP is required for direct Tailscale-IP connections. GatewayEndpoint rejects
+         non-Tailscale/non-loopback HTTP hosts at runtime. Google Code Scanner uses a
+         Play-services-owned camera flow, so this app deliberately declares no CAMERA permission. -->
+    <application
+        android:name="dev.zed.mobile.ZedMobileApplication"
+        android:allowBackup="false"
+        android:label="Zed Mobile"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ZedMobile"
+        android:usesCleartextTraffic="true">
+        <activity
+            android:name="dev.zed.mobile.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
