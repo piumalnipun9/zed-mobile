@@ -1,6 +1,6 @@
 # Zed Mobile (Android)
 
-Zed Mobile is a focused Android companion for the local `Zed-Desktop` fork. On a private Tailscale network it lets you choose an open project, continue a native Zed Agent thread, send prompts, see retained agent activity, make one-time tool decisions, adjust a thread's model/thinking configuration, and review recorded diffs.
+Zed Mobile is a focused Android companion for the local `Zed-Desktop` fork. On a private Tailscale network it lets you choose an open or recently used local project, continue a native Zed Agent thread, send prompts, see retained agent activity, make one-time tool decisions, adjust a thread's model/thinking configuration, review recorded diffs, and receive direct live task-completion notifications.
 
 It intentionally does **not** expose a general filesystem, terminal, shell, or remote desktop interface.
 
@@ -14,7 +14,9 @@ It intentionally does **not** expose a general filesystem, terminal, shell, or r
 - HTTPS uses Android certificate validation. Direct HTTP is accepted only for loopback, a literal Tailscale IPv4 address (`100.64.0.0/10`), or debug-only emulator `10.0.2.2`. Hostnames, LAN/public HTTP addresses, URL paths, URL credentials, queries, fragments, redirects, and non-default HTTP encodings are rejected.
 - Google Code Scanner runs in Google Play services, so the app intentionally declares **no** `CAMERA` permission.
 
-Pairing persists across app restarts, but the app has no permanent socket or background notification channel in this milestone. It polls only while the Agent chat is visible.
+For v2 QR pairings, **Stay connected for Agent notifications** is enabled by default. While it is enabled, Android runs a low-priority foreground service that holds a direct authenticated SSE connection to the paired desktop and posts generic Agent completion notifications. Android 13+ asks for notification permission when the connection is enabled. SSE events are ephemeral: the app neither saves event IDs nor asks the desktop to replay anything missed while the phone was offline.
+
+The latest authenticated v2 project catalog is cached locally only to make launch responsive. It is bound to the saved desktop origin and device ID, never grants access, and is discarded when that credential binding is removed or changes. If the desktop is unavailable, the app labels the catalog as last-known data and disables project actions until a fresh desktop request succeeds.
 
 ## Desktop setup
 
@@ -23,11 +25,10 @@ Pairing persists across app restarts, but the app has no permanent socket or bac
 3. Put the desktop and Android device on the same Tailscale tailnet.
 4. In **Settings → Mobile Gateway**, configure:
    - **Bind Address** as the desktop's Tailscale IP and port, for example `100.99.221.90:7331`;
-   - **Enabled**. Every currently open local project becomes available to paired phones, and phone-based one-time Agent approvals are always enabled.
-   - **Enabled**.
+   - **Enabled**. Every currently open local project becomes available to paired phones, recently used local projects can be reopened through the catalog, and phone-based one-time Agent approvals are always enabled.
 5. Choose **Connect mobile device**, open Zed Mobile, and scan the QR code.
 
-The gateway must never be made public through a proxy, port forwarding, or reverse tunnel. The project allowlist is an API-access boundary—not a sandbox for Agent tools—so review tool permissions, model data sharing, and potential provider costs.
+The gateway must never be made public through a proxy, port forwarding, or reverse tunnel. The desktop-maintained project catalog is an API-access boundary—not a sandbox for Agent tools—so review tool permissions, model data sharing, and potential provider costs.
 
 ## Android flow
 
@@ -59,4 +60,4 @@ Install it with Android Studio, or with ADB:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-For a real-device test, ensure the phone and desktop are connected to the same tailnet before scanning the desktop QR code. There is no background notification/push flow yet, so leave the app's Agent chat visible while expecting a tool approval.
+For a real-device test, ensure the phone and desktop are connected to the same tailnet before scanning the desktop QR code. Keep **Stay connected for Agent notifications** enabled in Settings, start or open a native Agent thread from Zed Mobile, background the app, then let that Agent turn finish to verify the generic completion notification. Events are intentionally dropped if the stream is offline; reopening the app later still lets you fetch the completed thread normally.

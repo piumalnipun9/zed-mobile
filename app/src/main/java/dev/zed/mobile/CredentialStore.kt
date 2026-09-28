@@ -219,5 +219,6 @@ class ZedMobileApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         CredentialStores.initialize(this)
+        ProjectCatalogStores.initialize(this)
     }
 }

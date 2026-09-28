@@ -1,12 +1,17 @@
 package dev.zed.mobile
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -77,6 +82,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -94,6 +100,7 @@ import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 private val ZedPrimary = Color(0xFF884C39)
@@ -105,6 +112,13 @@ private val ZedOutlineVariant = Color(0xFFD8C2BC)
 private val ZedTertiary = Color(0xFF2E6463)
 
 class MainActivity : ComponentActivity() {
+    private var notificationPermissionRequested = false
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) {
+        // A denied permission leaves the foreground connection active but suppresses event notifications.
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -125,6 +139,7 @@ class MainActivity : ComponentActivity() {
                     vm = vm,
                     scanning = scanning,
                     scannerFeedback = scannerFeedback,
+                    onNotificationPermissionNeeded = ::requestNotificationPermissionIfNeeded,
                     onScanQr = {
                         if (!scanning) {
                             scope.launch {
@@ -148,6 +163,17 @@ class MainActivity : ComponentActivity() {
                     },
                 )
             }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+            !notificationPermissionRequested
+        ) {
+            notificationPermissionRequested = true
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 }
@@ -214,13 +240,31 @@ fun ZedApp(
     vm: ZedViewModel = viewModel(),
     scanning: Boolean = false,
     scannerFeedback: String? = null,
+    onNotificationPermissionNeeded: () -> Unit = {},
     onScanQr: () -> Unit = {},
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val lifecycleOwner = LocalLifecycleOwner.current
+    val appContext = LocalContext.current.applicationContext
+    val connectionSettings = remember(appContext) { AndroidConnectionSettingsStore(appContext) }
+    var stayConnected by remember(connectionSettings) { mutableStateOf<Boolean?>(null) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
+    val settingsScope = rememberCoroutineScope()
 
+    LaunchedEffect(connectionSettings) {
+        connectionSettings.stayConnected.collect { stayConnected = it }
+    }
+    LaunchedEffect(state.hasPersistentPairing, stayConnected) {
+        when {
+            state.hasPersistentPairing && stayConnected == true -> {
+                GatewayEventService.start(appContext)
+                onNotificationPermissionNeeded()
+            }
+
+            stayConnected != null -> GatewayEventService.stop(appContext)
+        }
+    }
     LaunchedEffect(vm) {
         vm.restorePersistentPairing()
     }
@@ -235,7 +279,14 @@ fun ZedApp(
         }
     }
 
-    BackHandler(enabled = drawerState.isOpen || state.page in listOf(Page.THREADS, Page.CHAT, Page.CHANGES, Page.SETTINGS)) {
+    BackHandler(
+        enabled = drawerState.isOpen || state.page in listOf(
+            Page.THREADS,
+            Page.CHAT,
+            Page.CHANGES,
+            Page.SETTINGS
+        )
+    ) {
         if (drawerState.isOpen) {
             drawerScope.launch { drawerState.close() }
         } else {
@@ -311,7 +362,17 @@ fun ZedApp(
                         Page.THREADS -> ThreadScreen(state = state, vm = vm)
                         Page.CHAT -> ChatScreen(state = state, vm = vm)
                         Page.CHANGES -> ChangesScreen(state = state, refresh = vm::refresh)
-                        Page.SETTINGS -> SettingsScreen(state = state, vm = vm)
+                        Page.SETTINGS -> SettingsScreen(
+                            state = state,
+                            vm = vm,
+                            stayConnected = stayConnected ?: true,
+                            onStayConnectedChange = { enabled ->
+                                settingsScope.launch {
+                                    connectionSettings.setStayConnected(enabled)
+                                    if (!enabled) GatewayEventService.stop(appContext)
+                                }
+                            },
+                        )
                     }
                 }
             }
@@ -402,7 +463,11 @@ private fun MobileNavigationDrawer(
                 }
                 Column {
                     Text("Zed Mobile", style = MaterialTheme.typography.titleMedium)
-                    Text("Paired desktop", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "Paired desktop",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
             Surface(
@@ -413,7 +478,11 @@ private fun MobileNavigationDrawer(
                 color = ZedSurfaceLow,
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("CURRENT PROJECT", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "CURRENT PROJECT",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Text(
                         state.project?.name ?: "Choose a project",
                         style = MaterialTheme.typography.titleMedium,
@@ -423,8 +492,18 @@ private fun MobileNavigationDrawer(
                 }
             }
             DrawerDestination("□", "Projects", state.page == Page.PROJECTS, true) { onDestination(Page.PROJECTS) }
-            DrawerDestination("◌", "Threads", state.page == Page.THREADS, state.project != null) { onDestination(Page.THREADS) }
-            DrawerDestination("✦", "Agent", state.page == Page.CHAT, state.selectedThread != null) { onDestination(Page.CHAT) }
+            DrawerDestination(
+                "◌",
+                "Threads",
+                state.page == Page.THREADS,
+                state.project != null
+            ) { onDestination(Page.THREADS) }
+            DrawerDestination(
+                "✦",
+                "Agent",
+                state.page == Page.CHAT,
+                state.selectedThread != null
+            ) { onDestination(Page.CHAT) }
             Spacer(Modifier.weight(1f))
             HorizontalDivider(color = ZedOutlineVariant.copy(alpha = 0.55f))
             DrawerDestination("⚙", "Settings", state.page == Page.SETTINGS, true) { onDestination(Page.SETTINGS) }
@@ -543,7 +622,12 @@ private fun PairScreen(
 }
 
 @Composable
-private fun SettingsScreen(state: MobileState, vm: ZedViewModel) {
+private fun SettingsScreen(
+    state: MobileState,
+    vm: ZedViewModel,
+    stayConnected: Boolean,
+    onStayConnectedChange: (Boolean) -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -566,6 +650,12 @@ private fun SettingsScreen(state: MobileState, vm: ZedViewModel) {
                 SettingsDetail("Current thread", thread.title.ifBlank { "Untitled thread" })
             }
         }
+        SettingsCard {
+            StayConnectedSetting(
+                checked = stayConnected,
+                onCheckedChange = onStayConnectedChange,
+            )
+        }
 
         Text("Privacy", style = MaterialTheme.typography.headlineSmall)
         SettingsCard {
@@ -573,7 +663,7 @@ private fun SettingsScreen(state: MobileState, vm: ZedViewModel) {
             HorizontalDivider(color = ZedOutlineVariant.copy(alpha = 0.45f))
             SettingsDetail("Screenshots", "Blocked while Zed Mobile is open")
             HorizontalDivider(color = ZedOutlineVariant.copy(alpha = 0.45f))
-            SettingsDetail("Desktop access", "Projects open in desktop Zed only")
+            SettingsDetail("Desktop access", "Open projects and recently opened local projects")
         }
 
         Text("Manage pairing", style = MaterialTheme.typography.headlineSmall)
@@ -592,6 +682,35 @@ private fun SettingsScreen(state: MobileState, vm: ZedViewModel) {
         ) {
             Text("Disconnect this phone")
         }
+    }
+}
+
+@Composable
+private fun StayConnectedSetting(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 80.dp)
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 20.dp, vertical = 16.dp)
+            .semantics {
+                contentDescription = "Stay connected for Agent notifications"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Stay connected for Agent notifications", style = MaterialTheme.typography.labelLarge)
+            Text(
+                "Keep a secure direct connection to your paired Zed-Desktop while this phone is in the background.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+        )
     }
 }
 
@@ -622,13 +741,24 @@ private fun SettingsDetail(label: String, value: String) {
 @Composable
 private fun ProjectScreen(state: MobileState, vm: ZedViewModel) {
     var query by remember { mutableStateOf("") }
+    // The authenticated desktop catalog is already ordered by last opened time. Preserve that
+    // order in the cache and UI so the most recent project remains at the top.
     val projects = remember(state.projects, query) {
         state.projects.filter {
-            query.isBlank() || it.name.contains(query, ignoreCase = true) || it.path.contains(query, ignoreCase = true)
+            query.isBlank() ||
+                    it.name.contains(query, ignoreCase = true) ||
+                    it.path.contains(query, ignoreCase = true) ||
+                    it.kind.contains(query, ignoreCase = true) ||
+                    it.connectionName?.contains(query, ignoreCase = true) == true
         }
     }
+    val desktopAvailable = !state.gatewayUnavailable
     Column(modifier = Modifier.fillMaxSize()) {
-        ConnectionHeader(host = state.host, detail = "Workspace active")
+        ConnectionHeader(
+            host = state.host,
+            detail = if (desktopAvailable) "Workspace active" else "Gateway unavailable",
+        )
+        state.notice?.let { Feedback(text = it) }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
@@ -651,28 +781,63 @@ private fun ProjectScreen(state: MobileState, vm: ZedViewModel) {
                     EmptyCard(
                         title = if (state.projects.isEmpty()) "No projects yet" else "No matching projects",
                         detail = if (state.projects.isEmpty()) {
-                            "Open a project in desktop Zed, then refresh this workspace."
+                            "Open a project in desktop Zed once. It will then be available here."
                         } else {
                             "Try a different project name or path."
                         },
                     )
                 }
             }
+            if (projects.isNotEmpty()) {
+                item {
+                    ProjectSectionLabel(
+                        if (desktopAvailable) "Recent projects" else "Last known projects",
+                    )
+                }
+            }
             itemsIndexed(projects, key = { _, project -> project.id }) { _, project ->
-                ProjectCard(project = project, enabled = !state.busy, onClick = { vm.openProject(project) })
+                ProjectCard(
+                    project = project,
+                    enabled = !state.busy && desktopAvailable,
+                    desktopAvailable = desktopAvailable,
+                    onClick = { vm.openProject(project) },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ProjectCard(project: Project, enabled: Boolean, onClick: () -> Unit) {
+private fun ProjectSectionLabel(label: String) {
+    Text(
+        label,
+        modifier = Modifier.padding(start = 4.dp, top = 8.dp, bottom = 4.dp),
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun ProjectCard(
+    project: Project,
+    enabled: Boolean,
+    desktopAvailable: Boolean,
+    onClick: () -> Unit,
+) {
+    val source = project.sourceLabel()
     Card(
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
-            .semantics { contentDescription = "Open project ${project.name}" },
+            .semantics {
+                contentDescription = when {
+                    !desktopAvailable -> "Desktop gateway unavailable for project ${project.name}"
+                    project.opening -> "Project ${project.name} is connecting on Desktop from $source"
+                    project.isOpen -> "Open project ${project.name} from $source"
+                    else -> "Open $project.name on Desktop from $source"
+                }
+            },
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = ZedSurfaceLowest),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
@@ -705,6 +870,13 @@ private fun ProjectCard(project: Project, enabled: Boolean, onClick: () -> Unit)
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    Text(
+                        "Source · $source",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 Text(
                     "•••",
@@ -714,16 +886,39 @@ private fun ProjectCard(project: Project, enabled: Boolean, onClick: () -> Unit)
             }
             HorizontalDivider(color = ZedOutlineVariant.copy(alpha = 0.45f))
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                StatusPill(label = "Ready")
+                StatusPill(
+                    label = when {
+                        !desktopAvailable -> "Gateway unavailable"
+                        project.opening -> "Connecting on Desktop"
+                        project.isOpen -> "Open on Desktop"
+                        else -> "Not open"
+                    },
+                )
                 Spacer(Modifier.weight(1f))
                 Text(
-                    "View threads  →",
+                    when {
+                        !desktopAvailable -> "Reconnect to desktop"
+                        project.opening -> "Connecting…"
+                        project.isOpen -> "View threads  →"
+                        else -> "Open on Desktop  →"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary
                 )
             }
         }
     }
+}
+
+private fun Project.sourceLabel(): String {
+    val source = when (kind) {
+        PROJECT_KIND_SSH -> "SSH"
+        PROJECT_KIND_WSL -> "WSL"
+        PROJECT_KIND_DOCKER -> "Docker"
+        PROJECT_KIND_PODMAN -> "Podman"
+        else -> "Local"
+    }
+    return connectionName?.takeIf(String::isNotBlank)?.let { "$source · $it" } ?: source
 }
 
 @Composable

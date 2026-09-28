@@ -49,8 +49,20 @@ class HttpZedRepository private constructor(
         }
     }
 
-    override suspend fun projects() = request("GET", listOf("projects")).objects("projects").map {
-        Project(it.string("id"), it.string("name"), it.string("path"))
+    override suspend fun projects(): List<Project> {
+        val segments = if (apiVersion == API_VERSION_V2) {
+            listOf("projects", "catalog")
+        } else {
+            listOf("projects")
+        }
+        return request("GET", segments).objects("projects").map { it.project() }
+    }
+
+    override suspend fun openProject(id: String): Project {
+        if (apiVersion != API_VERSION_V2) {
+            throw GatewayException("Remote project opening requires Zed-Desktop Mobile Gateway API v2.")
+        }
+        return request("POST", listOf("projects", "catalog", id, "open")).project()
     }
 
     override suspend fun threads(projectId: String) = request("GET", listOf("projects", projectId, "threads"))
@@ -390,6 +402,15 @@ private fun JsonObject.bool(key: String): Boolean {
     return value.asBoolean
 }
 
+private fun JsonObject.optionalBoolean(key: String): Boolean? {
+    val value = get(key) ?: return null
+    if (value.isJsonNull) return null
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isBoolean) {
+        throw GatewayException("Invalid desktop boolean '$key'.")
+    }
+    return value.asBoolean
+}
+
 private fun JsonObject.objects(key: String): List<JsonObject> {
     val value = get(key)
     if (value == null || !value.isJsonArray || value.asJsonArray.any { !it.isJsonObject }) {
@@ -420,6 +441,24 @@ private fun JsonObject.optionalValue(key: String): String? {
 }
 
 private fun JsonObject.summary() = ThreadSummary(string("id"), string("title"), string("status"))
+
+private fun JsonObject.project(): Project {
+    val kind = optionalString("kind") ?: PROJECT_KIND_LOCAL
+    if (kind !in PROJECT_KINDS) {
+        throw GatewayException("Invalid desktop project kind '$kind'.")
+    }
+    return Project(
+        id = string("id"),
+        name = string("name"),
+        path = string("path"),
+        // Older gateways only returned active workspaces, so absence means ready/open.
+        isOpen = optionalBoolean("is_open") ?: true,
+        // The source metadata is optional so catalogs from pre-remote gateways remain readable.
+        kind = kind,
+        connectionName = optionalString("connection_name"),
+        opening = optionalBoolean("opening") ?: false,
+    )
+}
 
 private fun JsonObject.transcriptEntry(): TranscriptEntry {
     val kind = string("kind")

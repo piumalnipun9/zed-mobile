@@ -13,6 +13,7 @@ import java.util.concurrent.TimeUnit
 class HttpZedRepositoryTest {
     private lateinit var server: MockWebServer
     private lateinit var repo: HttpZedRepository
+
     @Before
     fun setup() {
         server = MockWebServer()
@@ -44,7 +45,12 @@ class HttpZedRepositoryTest {
             respond("""{"api_version":1,"name":"Zed-Desktop","future":true}""")
             repo.checkStatus(); request("GET", "/v1/status")
             respond("""{"projects":[{"id":"project /?%#","name":"Zed","path":"/work/zed"}]}""")
-            assertEquals("Zed", repo.projects().single().name); request("GET", "/v1/projects")
+            val legacyProject = repo.projects().single()
+            assertEquals("Zed", legacyProject.name)
+            assertEquals(PROJECT_KIND_LOCAL, legacyProject.kind)
+            assertFalse(legacyProject.opening)
+            assertNull(legacyProject.connectionName)
+            request("GET", "/v1/projects")
             respond("""{"threads":[{"id":"thread /?%#","title":"Fix bug","status":"running"}]}""")
             val summary = repo.threads("project /?%#").single()
             request("GET", "/v1/projects/project%20%2F%3F%25%23/threads")
@@ -61,6 +67,29 @@ class HttpZedRepositoryTest {
             respond("""{"files":[{"path":"a.kt","diff":"--- a/a.kt\n+++ b/a.kt\n@@ -1 +1 @@\n-old\n+new","additions":1,"deletions":1}]}""")
             assertTrue(repo.changes(summary.id).single().diff.contains("+new"))
             request("GET", "/v1/threads/thread%20%2F%3F%25%23/changes")
+        }
+    }
+
+    @Test
+    fun `v2 catalog maps remote source and connecting state`() {
+        runBlocking {
+            val v2Repo = HttpZedRepository.v2(
+                host = "http://127.0.0.1:${server.port}",
+                credential = "fixture-token",
+                debug = false,
+            )
+            respond(
+                """{"projects":[{"id":"opaque-catalog-id","name":"Remote Zed","path":"~/src/zed","is_open":false,"kind":"ssh","connection_name":"work-bastion","opening":true}]}""",
+            )
+
+            val project = v2Repo.projects().single()
+
+            assertEquals("opaque-catalog-id", project.id)
+            assertEquals(PROJECT_KIND_SSH, project.kind)
+            assertEquals("work-bastion", project.connectionName)
+            assertFalse(project.isOpen)
+            assertTrue(project.opening)
+            request("GET", "/v2/projects/catalog")
         }
     }
 

@@ -1,8 +1,38 @@
 package dev.zed.mobile
 
-data class Project(val id: String, val name: String, val path: String)
+/**
+ * A desktop project that the paired phone may select. [isOpen] distinguishes a workspace which
+ * is ready for Agent work from a remembered catalog entry which must be opened on the desktop
+ * first. [kind] and [connectionName] identify the desktop-managed source; neither is supplied by
+ * the phone. [opening] means the desktop is still establishing that source.
+ */
+data class Project(
+    val id: String,
+    val name: String,
+    val path: String,
+    val isOpen: Boolean = true,
+    val kind: String = PROJECT_KIND_LOCAL,
+    val connectionName: String? = null,
+    val opening: Boolean = false,
+)
+
+const val PROJECT_KIND_LOCAL = "local"
+const val PROJECT_KIND_SSH = "ssh"
+const val PROJECT_KIND_WSL = "wsl"
+const val PROJECT_KIND_DOCKER = "docker"
+const val PROJECT_KIND_PODMAN = "podman"
+
+val PROJECT_KINDS = setOf(
+    PROJECT_KIND_LOCAL,
+    PROJECT_KIND_SSH,
+    PROJECT_KIND_WSL,
+    PROJECT_KIND_DOCKER,
+    PROJECT_KIND_PODMAN,
+)
+
 data class ThreadSummary(val id: String, val title: String, val status: String)
 data class Message(val role: String, val text: String)
+
 
 data class TranscriptChunk(val kind: String, val text: String)
 
@@ -78,6 +108,9 @@ data class DeviceCredential(
 interface ZedRepository {
     suspend fun checkStatus()
     suspend fun projects(): List<Project>
+
+    /** Opens a project from the desktop-maintained v2 catalog. It never accepts a phone path. */
+    suspend fun openProject(id: String): Project = unsupported("Remote project opening")
     suspend fun threads(projectId: String): List<ThreadSummary>
     suspend fun thread(id: String): ThreadSnapshot
     suspend fun createThread(projectId: String): ThreadSummary

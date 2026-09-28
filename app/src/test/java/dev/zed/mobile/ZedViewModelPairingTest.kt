@@ -9,6 +9,8 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -39,6 +41,7 @@ class ZedViewModelPairingTest {
             credential = "credential-ABC_123",
         )
         val store = InMemoryCredentialStore()
+        val catalogStore = InMemoryProjectCatalogStore()
         val pairing = RecordingPairingRepository(credential)
         val repository = RecordingZedRepository(listOf(Project("project-1", "Mobile", "/work/mobile")))
         var pairingEndpoint: String? = null
@@ -53,6 +56,7 @@ class ZedViewModelPairingTest {
                 pairing
             },
             credentialStore = store,
+            projectCatalogStore = catalogStore,
         )
 
         viewModel.pairQr(QrPairingContract.encode(ticket, debug = false))
@@ -62,10 +66,43 @@ class ZedViewModelPairingTest {
         assertEquals("Zed Mobile", pairing.deviceLabel)
         assertEquals(credential, connectedCredential)
         assertEquals(credential, store.load())
+        assertEquals(repository.projectList, catalogStore.load(credential))
         assertEquals(1, repository.statusChecks)
         assertEquals(Page.PROJECTS, viewModel.state.value.page)
+        assertTrue(viewModel.state.value.hasPersistentPairing)
         assertEquals(ticket.origin, viewModel.state.value.host)
         assertEquals(repository.projectList, viewModel.state.value.projects)
+        assertFalse(viewModel.state.value.busy)
+    }
+
+    @Test
+    fun `restored pairing clears the credential when desktop has revoked it`() = runTest {
+        val credential = DeviceCredential(
+            origin = "https://zed.example:7443",
+            deviceId = "device-123",
+            credential = "credential-ABC_123",
+        )
+        val store = InMemoryCredentialStore(credential)
+        val catalogStore = InMemoryProjectCatalogStore().apply {
+            save(credential, listOf(Project("project-1", "Cached", "/work/cached", isOpen = false)))
+        }
+        val repository = RecordingZedRepository(emptyList()).apply {
+            statusError = GatewayAuthenticationException("Device credential rejected.")
+        }
+        val viewModel = ZedViewModel(
+            connectV2 = { repository },
+            credentialStore = store,
+            projectCatalogStore = catalogStore,
+        )
+
+        viewModel.restorePersistentPairing()
+
+        assertEquals(1, repository.statusChecks)
+        assertNull(store.load())
+        assertNull(catalogStore.load(credential))
+        assertFalse(viewModel.state.value.hasPersistentPairing)
+        assertEquals(Page.PAIR, viewModel.state.value.page)
+        assertEquals("This desktop removed the pairing. Scan a new QR code to reconnect.", viewModel.state.value.notice)
         assertFalse(viewModel.state.value.busy)
     }
 
@@ -77,6 +114,7 @@ class ZedViewModelPairingTest {
             credential = "credential-ABC_123",
         )
         val store = InMemoryCredentialStore(credential)
+        val catalogStore = InMemoryProjectCatalogStore()
         val repository = RecordingZedRepository(listOf(Project("project-1", "Mobile", "/work/mobile")))
         var connectedCredential: DeviceCredential? = null
         val viewModel = ZedViewModel(
@@ -85,6 +123,7 @@ class ZedViewModelPairingTest {
                 repository
             },
             credentialStore = store,
+            projectCatalogStore = catalogStore,
         )
 
         viewModel.restorePersistentPairing()
@@ -92,8 +131,10 @@ class ZedViewModelPairingTest {
         assertEquals(credential, connectedCredential)
         assertEquals(1, repository.statusChecks)
         assertEquals(Page.PROJECTS, viewModel.state.value.page)
+        assertTrue(viewModel.state.value.hasPersistentPairing)
         assertEquals(credential.origin, viewModel.state.value.host)
         assertEquals(repository.projectList, viewModel.state.value.projects)
+        assertEquals(repository.projectList, catalogStore.load(credential))
         assertFalse(viewModel.state.value.busy)
     }
 
@@ -114,9 +155,11 @@ class ZedViewModelPairingTest {
         val projectList: List<Project>,
     ) : ZedRepository {
         var statusChecks = 0
+        var statusError: Exception? = null
 
         override suspend fun checkStatus() {
             statusChecks++
+            statusError?.let { throw it }
         }
 
         override suspend fun projects(): List<Project> = projectList
