@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import dev.zeddesktop.mobile.BuildConfig
+import dev.zeddesktop.mobile.R
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -133,15 +134,35 @@ class GatewayEventService : Service() {
 
     private fun showCompletionNotification(event: AgentCompletionEvent) {
         if (!canPostNotifications()) return
-        // Event identifiers stay local to the transport and are never surfaced in notifications.
+        // Opaque event IDs stay local to the transport. The desktop supplies only bounded project
+        // and thread display labels for this private, user-visible notification.
+        val (title, detail, category) = when (event.type) {
+            AgentCompletionEventType.COMPLETED -> Triple(
+                "Agent task completed",
+                "${event.threadTitle} completed in ${event.projectName} on your paired desktop.",
+                Notification.CATEGORY_STATUS,
+            )
+
+            AgentCompletionEventType.FAILED -> Triple(
+                "Agent task failed",
+                "${event.threadTitle} needs attention in ${event.projectName} on your paired desktop.",
+                Notification.CATEGORY_ERROR,
+            )
+        }
         val notificationId = nextNotificationId()
         val notification = Notification.Builder(this, EVENT_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("Agent update")
-            .setContentText("An Agent task finished on your paired desktop.")
+            .setSmallIcon(R.drawable.ic_stat_zed)
+            .setContentTitle(title)
+            .setContentText("${event.projectName} · ${event.threadTitle}")
+            .setStyle(
+                Notification.BigTextStyle()
+                    .bigText(detail)
+                    .setBigContentTitle(title)
+                    .setSummaryText("Zed Desktop"),
+            )
             .setContentIntent(contentIntentFor(notificationId))
             .setAutoCancel(true)
-            .setCategory(Notification.CATEGORY_STATUS)
+            .setCategory(category)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .build()
         getSystemService(NotificationManager::class.java).notify(notificationId, notification)
@@ -160,7 +181,7 @@ class GatewayEventService : Service() {
 
     private fun startAsForeground() {
         val notification = Notification.Builder(this, CONNECTION_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_zed)
             .setContentTitle("Connected to Zed-Desktop for Agent updates")
             .setContentText("Listening directly to your paired desktop.")
             .setContentIntent(appContentIntent())
@@ -207,7 +228,7 @@ class GatewayEventService : Service() {
                 "Agent task updates",
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
-                description = "Completion updates from your paired Zed desktop"
+                description = "Completion and failure updates from all Agent tasks on your paired Zed desktop"
             },
         )
     }

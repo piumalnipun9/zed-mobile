@@ -42,16 +42,31 @@ data class TranscriptEntry(
     val text: String? = null,
     val chunks: List<TranscriptChunk> = emptyList(),
     val toolCallId: String? = null,
+    /** Full tool output is fetched on demand and is never included in a thread snapshot. */
+    val detailsAvailable: Boolean = false,
     val title: String? = null,
     val toolName: String? = null,
     val status: String? = null,
+    // Kept only to display a snapshot from an older desktop during a rolling upgrade.
     val content: List<String> = emptyList(),
     val rawInput: String? = null,
     val rawOutput: String? = null,
     val planEntries: List<PlanEntry> = emptyList(),
+    /** Set on `elicitation` entries so an inline question card can find its pending form. */
+    val elicitationId: String? = null,
 )
 
 data class PlanEntry(val text: String, val status: String)
+
+/** Bounded, display-only detailed output for one retained desktop tool call. */
+data class ToolDetails(
+    val toolCallId: String,
+    val status: String,
+    val available: Boolean,
+    val format: String? = null,
+    val output: String? = null,
+    val truncated: Boolean = false,
+)
 
 data class ThreadSnapshot(
     val id: String,
@@ -59,9 +74,50 @@ data class ThreadSnapshot(
     val status: String,
     val messages: List<Message>,
     val transcript: List<TranscriptEntry> = emptyList(),
+    /** How many older transcript entries exist before the first one in [transcript]. */
+    val transcriptOmittedEntries: Int = 0,
 )
 
-data class ChangedFile(val path: String, val diff: String, val additions: Int, val deletions: Int)
+/** One page of older transcript entries, oldest first. */
+data class TranscriptPage(val entries: List<TranscriptEntry>, val omittedEntries: Int)
+
+data class ChangedFile(
+    val path: String,
+    val diff: String,
+    val additions: Int,
+    val deletions: Int,
+    /** True when the diff was too large to embed; page it in with `changedFilePage`. */
+    val truncated: Boolean = false,
+    /** True while the Agent's edits to this file await Keep or Reject on desktop or phone. */
+    val unreviewed: Boolean = false,
+)
+
+data class ChangesSnapshot(
+    val files: List<ChangedFile>,
+    val unreviewedFiles: List<String> = emptyList(),
+    val canUndoReject: Boolean = false,
+)
+
+data class DiffPage(val path: String, val diff: String, val offset: Int, val nextOffset: Int?, val totalLines: Int)
+
+const val PERMISSION_ALLOW_ONCE = "allow_once"
+const val PERMISSION_ALLOW_ALWAYS = "allow_always"
+const val PERMISSION_REJECT_ONCE = "reject_once"
+const val PERMISSION_REJECT_ALWAYS = "reject_always"
+
+/** A desktop-issued option for a pending tool call. The phone only ever echoes its ID back. */
+data class PermissionChoice(
+    val optionId: String,
+    val label: String,
+    val kind: String,
+    val enabled: Boolean = true,
+) {
+    val allows: Boolean get() = kind != PERMISSION_REJECT_ONCE && kind != PERMISSION_REJECT_ALWAYS
+    val isAlways: Boolean get() = kind == PERMISSION_ALLOW_ALWAYS || kind == PERMISSION_REJECT_ALWAYS
+}
+
+/** A command pattern (for example `cargo test *`) an always-rule can be scoped to. */
+data class PermissionPattern(val index: Int, val pattern: String, val displayName: String)
 
 data class ToolApproval(
     val toolCallId: String,
@@ -71,7 +127,48 @@ data class ToolApproval(
     val rawInput: String?,
     val allowOnceAvailable: Boolean,
     val denyOnceAvailable: Boolean,
+    /** `permission` grants or denies the call; `action_choice` picks what the tool does next. */
+    val kind: String = "permission",
+    val options: List<PermissionChoice> = emptyList(),
+    val patterns: List<PermissionPattern> = emptyList(),
+    val allowBlockedReason: String? = null,
 )
+
+/** The phone's answer to a pending approval: a desktop option, optionally scoped to patterns. */
+data class ApprovalDecision(val optionId: String, val patterns: List<Int> = emptyList())
+
+data class ElicitationChoice(val value: String, val label: String, val description: String? = null)
+
+enum class ElicitationFieldType { TEXT, NUMBER, INTEGER, BOOLEAN, SINGLE_SELECT, MULTI_SELECT }
+
+data class ElicitationField(
+    val name: String,
+    val title: String,
+    val description: String?,
+    val type: ElicitationFieldType,
+    val required: Boolean,
+    val choices: List<ElicitationChoice> = emptyList(),
+    val defaultText: String? = null,
+    val defaultBoolean: Boolean? = null,
+    val defaultChoices: List<String> = emptyList(),
+)
+
+/** A question the Agent asked. Form questions can be answered on the phone. */
+data class Elicitation(
+    val id: String,
+    val message: String,
+    val mode: String,
+    val url: String? = null,
+    val fields: List<ElicitationField> = emptyList(),
+) {
+    val answerable: Boolean get() = mode == "form"
+}
+
+sealed interface ElicitationValue {
+    data class Text(val value: String) : ElicitationValue
+    data class Flag(val value: Boolean) : ElicitationValue
+    data class Choices(val values: List<String>) : ElicitationValue
+}
 
 data class ModelCapability(
     val providerId: String,
@@ -117,6 +214,15 @@ interface ZedRepository {
     suspend fun send(id: String, text: String)
     suspend fun cancel(id: String)
     suspend fun changes(id: String): List<ChangedFile>
+    suspend fun changesSnapshot(id: String): ChangesSnapshot = ChangesSnapshot(changes(id))
+    suspend fun changedFilePage(id: String, path: String, offset: Int): DiffPage = unsupported("Paged diffs")
+
+    /** Keeps (accepts) or rejects (reverts) unreviewed Agent edits. Null [paths] means every file. */
+    suspend fun reviewChanges(id: String, keep: Boolean, paths: List<String>?) = unsupported<Unit>("Reviewing edits")
+    suspend fun undoReject(id: String) = unsupported<Unit>("Reviewing edits")
+    suspend fun olderTranscript(id: String, before: Int): TranscriptPage = unsupported("Older transcript entries")
+    suspend fun toolDetails(threadId: String, toolCallId: String): ToolDetails =
+        unsupported("Tool output details")
 
     suspend fun models(projectId: String): List<ModelCapability> = unsupported("Model selection")
     suspend fun configuration(id: String): ThreadConfiguration = unsupported("Thread configuration")
@@ -130,6 +236,18 @@ interface ZedRepository {
 
     suspend fun approvals(id: String): List<ToolApproval> = unsupported("Tool approvals")
     suspend fun resolveApproval(id: String, toolCallId: String, allow: Boolean) = unsupported<Unit>("Tool approvals")
+    suspend fun resolveApproval(id: String, toolCallId: String, decision: ApprovalDecision) =
+        unsupported<Unit>("Tool approval options")
+
+    suspend fun elicitations(id: String): List<Elicitation> = unsupported("Agent questions")
+
+    /** [action] is `accept`, `decline` or `cancel`; [values] is used only to accept. */
+    suspend fun answerElicitation(
+        id: String,
+        elicitationId: String,
+        action: String,
+        values: Map<String, ElicitationValue> = emptyMap(),
+    ) = unsupported<Unit>("Agent questions")
     suspend fun revokeCurrentDevice() = unsupported<Unit>("Device revocation")
 
     private fun <T> unsupported(feature: String): T =

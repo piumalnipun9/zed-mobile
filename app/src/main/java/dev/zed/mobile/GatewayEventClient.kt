@@ -22,7 +22,11 @@ import okio.BufferedSource
 data class AgentCompletionEvent(
     val type: AgentCompletionEventType,
     val projectId: String,
+    /** Bounded desktop-derived label used only for a private notification display. */
+    val projectName: String,
     val threadId: String,
+    /** Bounded desktop-derived label used only for a private notification display. */
+    val threadTitle: String,
     val turnId: String,
 )
 
@@ -209,7 +213,8 @@ private class SseEventAccumulator {
 
 /**
  * Parses the exact v2 event envelope: the completion kind is the SSE `event:` name, while the
- * JSON `data:` object contains only the project, thread, and turn identifiers.
+ * JSON `data:` object contains opaque IDs plus bounded, desktop-derived project/thread labels
+ * intended only for the private Android notification display.
  */
 private fun parseAgentCompletionEvent(eventName: String?, payload: String): AgentCompletionEvent? {
     val type = agentCompletionEventTypeFromSseName(eventName) ?: return null
@@ -223,9 +228,11 @@ private fun parseAgentCompletionEvent(eventName: String?, payload: String): Agen
     if (objectValue.keySet() != COMPLETION_EVENT_FIELDS) return null
 
     val projectId = objectValue.requiredEventString("project_id") ?: return null
+    val projectName = objectValue.requiredEventLabel("project_name") ?: return null
     val threadId = objectValue.requiredEventString("thread_id") ?: return null
+    val threadTitle = objectValue.requiredEventLabel("thread_title") ?: return null
     val turnId = objectValue.requiredEventString("turn_id") ?: return null
-    return AgentCompletionEvent(type, projectId, threadId, turnId)
+    return AgentCompletionEvent(type, projectId, projectName, threadId, threadTitle, turnId)
 }
 
 private fun JsonObject.requiredEventString(name: String): String? {
@@ -233,6 +240,20 @@ private fun JsonObject.requiredEventString(name: String): String? {
     if (!value.isJsonPrimitive || !value.asJsonPrimitive.isString) return null
     val string = value.asString
     if (string.isEmpty() || string.toByteArray(StandardCharsets.UTF_8).size > MAX_SSE_IDENTIFIER_BYTES) return null
+    return string
+}
+
+private fun JsonObject.requiredEventLabel(name: String): String? {
+    val value = get(name) ?: return null
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isString) return null
+    val string = value.asString
+    if (
+        string.isBlank() ||
+        string.any { character -> character.code < 0x20 || character.code == 0x7f } ||
+        string.toByteArray(StandardCharsets.UTF_8).size > MAX_SSE_LABEL_BYTES
+    ) {
+        return null
+    }
     return string
 }
 
@@ -251,5 +272,12 @@ private const val MAX_SSE_EVENT_BYTES = 64 * 1024
 private const val MAX_SSE_DATA_BYTES = 64 * 1024
 private const val MAX_SSE_EVENT_NAME_BYTES = 128
 private const val MAX_SSE_IDENTIFIER_BYTES = 4 * 1024
-private val COMPLETION_EVENT_FIELDS = setOf("project_id", "thread_id", "turn_id")
+private const val MAX_SSE_LABEL_BYTES = 256
+private val COMPLETION_EVENT_FIELDS = setOf(
+    "project_id",
+    "project_name",
+    "thread_id",
+    "thread_title",
+    "turn_id",
+)
 private const val LF: Byte = 0x0a

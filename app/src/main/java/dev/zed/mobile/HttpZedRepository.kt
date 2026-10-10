@@ -1,5 +1,6 @@
 package dev.zed.mobile
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
@@ -76,6 +77,20 @@ class HttpZedRepository private constructor(
             status = obj.string("status"),
             messages = obj.objects("messages").map { Message(it.string("role"), it.string("text")) },
             transcript = obj.optionalObjects("transcript").map { it.transcriptEntry() },
+            transcriptOmittedEntries = obj.optionalNumber("transcript_omitted_entries") ?: 0,
+        )
+    }
+
+    override suspend fun olderTranscript(id: String, before: Int): TranscriptPage {
+        requireV2("Older transcript entries")
+        val page = request(
+            "GET",
+            listOf("threads", id, "transcript"),
+            query = mapOf("before" to before.toString(), "limit" to TRANSCRIPT_PAGE_SIZE.toString()),
+        )
+        return TranscriptPage(
+            entries = page.objects("entries").map { it.transcriptEntry() },
+            omittedEntries = page.number("omitted_entries"),
         )
     }
 
@@ -99,8 +114,62 @@ class HttpZedRepository private constructor(
         accepted(request("POST", listOf("threads", id, "cancel")))
     }
 
-    override suspend fun changes(id: String) = request("GET", listOf("threads", id, "changes")).objects("files").map {
-        ChangedFile(it.string("path"), it.string("diff"), it.number("additions"), it.number("deletions"))
+    override suspend fun changes(id: String) = changesSnapshot(id).files
+
+    override suspend fun changesSnapshot(id: String): ChangesSnapshot {
+        val value = request("GET", listOf("threads", id, "changes"))
+        val review = value.get("review")?.takeIf { it.isJsonObject }?.asJsonObject
+        return ChangesSnapshot(
+            files = value.objects("files").map {
+                ChangedFile(
+                    path = it.string("path"),
+                    diff = it.string("diff"),
+                    additions = it.number("additions"),
+                    deletions = it.number("deletions"),
+                    truncated = it.optionalBoolean("truncated") ?: false,
+                    unreviewed = it.optionalBoolean("unreviewed") ?: false,
+                )
+            },
+            unreviewedFiles = review?.optionalStrings("unreviewed_files").orEmpty(),
+            canUndoReject = review?.optionalBoolean("can_undo_reject") ?: false,
+        )
+    }
+
+    override suspend fun changedFilePage(id: String, path: String, offset: Int): DiffPage {
+        requireV2("Paged diffs")
+        val value = request(
+            "GET",
+            listOf("threads", id, "changes", "file"),
+            query = mapOf("path" to path, "offset" to offset.toString()),
+        )
+        return DiffPage(
+            path = value.string("path"),
+            diff = value.string("diff"),
+            offset = value.number("offset"),
+            nextOffset = value.optionalNumber("next_offset"),
+            totalLines = value.number("total_lines"),
+        )
+    }
+
+    override suspend fun reviewChanges(id: String, keep: Boolean, paths: List<String>?) {
+        requireV2("Reviewing edits")
+        val body = JsonObject().apply {
+            addProperty("action", if (keep) "keep" else "reject")
+            paths?.let { add("paths", JsonArray().apply { it.forEach(::add) }) }
+        }
+        accepted(request("POST", listOf("threads", id, "changes", "review"), body))
+    }
+
+    override suspend fun undoReject(id: String) {
+        requireV2("Reviewing edits")
+        accepted(request("POST", listOf("threads", id, "changes", "undo-reject")))
+    }
+
+    override suspend fun toolDetails(threadId: String, toolCallId: String): ToolDetails {
+        if (apiVersion != API_VERSION_V2) {
+            throw GatewayException("Tool output details require Zed-Desktop Mobile Gateway API v2.")
+        }
+        return request("GET", listOf("threads", threadId, "tool-calls", toolCallId, "output")).toolDetails()
     }
 
     override suspend fun models(projectId: String): List<ModelCapability> = request(
@@ -151,7 +220,61 @@ class HttpZedRepository private constructor(
             rawInput = approval.optionalValue("raw_input"),
             allowOnceAvailable = approval.bool("allow_once_available"),
             denyOnceAvailable = approval.bool("deny_once_available"),
+            kind = approval.optionalString("kind") ?: "permission",
+            options = approval.optionalObjects("options").map {
+                PermissionChoice(
+                    optionId = it.string("option_id"),
+                    label = it.string("label"),
+                    kind = it.string("kind"),
+                    enabled = it.optionalBoolean("enabled") ?: true,
+                )
+            },
+            patterns = approval.optionalObjects("patterns").map {
+                PermissionPattern(it.number("index"), it.string("pattern"), it.string("display_name"))
+            },
+            allowBlockedReason = approval.optionalString("allow_blocked_reason"),
         )
+    }
+
+    override suspend fun resolveApproval(id: String, toolCallId: String, decision: ApprovalDecision) {
+        requireV2("Tool approval options")
+        val body = JsonObject().apply {
+            addProperty("option_id", decision.optionId)
+            if (decision.patterns.isNotEmpty()) {
+                add("patterns", JsonArray().apply { decision.patterns.forEach(::add) })
+            }
+        }
+        accepted(request("POST", listOf("threads", id, "approvals", toolCallId, "resolve"), body))
+    }
+
+    override suspend fun elicitations(id: String): List<Elicitation> {
+        requireV2("Agent questions")
+        return request("GET", listOf("threads", id, "elicitations")).objects("elicitations").map { it.elicitation() }
+    }
+
+    override suspend fun answerElicitation(
+        id: String,
+        elicitationId: String,
+        action: String,
+        values: Map<String, ElicitationValue>,
+    ) {
+        requireV2("Agent questions")
+        require(action in setOf("accept", "decline", "cancel")) { "Unsupported answer action." }
+        val body = JsonObject().apply {
+            addProperty("action", action)
+            if (action == "accept") {
+                add("content", JsonObject().apply {
+                    values.forEach { (name, value) ->
+                        when (value) {
+                            is ElicitationValue.Text -> addProperty(name, value.value)
+                            is ElicitationValue.Flag -> addProperty(name, value.value)
+                            is ElicitationValue.Choices -> add(name, JsonArray().apply { value.values.forEach(::add) })
+                        }
+                    }
+                })
+            }
+        }
+        accepted(request("POST", listOf("threads", id, "elicitations", elicitationId, "respond"), body))
     }
 
     override suspend fun resolveApproval(id: String, toolCallId: String, allow: Boolean) {
@@ -173,6 +296,12 @@ class HttpZedRepository private constructor(
         }
     }
 
+    private fun requireV2(feature: String) {
+        if (apiVersion != API_VERSION_V2) {
+            throw GatewayException("$feature requires Zed-Desktop Mobile Gateway API v2.")
+        }
+    }
+
     private fun accepted(obj: JsonObject) {
         val value = obj.get("accepted")
         if (value == null || !value.isJsonPrimitive || !value.asJsonPrimitive.isBoolean || !value.asBoolean) {
@@ -180,13 +309,19 @@ class HttpZedRepository private constructor(
         }
     }
 
-    private suspend fun request(method: String, segments: List<String>, body: JsonObject? = null): JsonObject {
+    private suspend fun request(
+        method: String,
+        segments: List<String>,
+        body: JsonObject? = null,
+        query: Map<String, String> = emptyMap(),
+    ): JsonObject {
         require(segments.none { it.isEmpty() || it == "." || it == ".." }) {
             "Desktop returned an invalid empty or dot-segment ID."
         }
         require(method in setOf("GET", "POST", "PUT")) { "Unsupported desktop request method." }
         val url = origin.newBuilder().addPathSegment("v$apiVersion").apply {
             segments.forEach { addPathSegment(it) }
+            query.forEach { (key, value) -> addQueryParameter(key, value) }
         }.build()
         val requestBody = when (method) {
             "POST", "PUT" -> (body?.toString() ?: "{}").toRequestBody(JSON_MEDIA_TYPE)
@@ -211,6 +346,7 @@ class HttpZedRepository private constructor(
     companion object {
         private const val API_VERSION_V1 = 1
         private const val API_VERSION_V2 = 2
+        private const val TRANSCRIPT_PAGE_SIZE = 200
 
         /** Creates a v2 device-authenticated repository from a saved claim response. */
         fun v2(
@@ -394,6 +530,15 @@ private fun JsonObject.number(key: String): Int {
     return value.asString.toIntOrNull() ?: throw GatewayException("Invalid desktop integer '$key'.")
 }
 
+private fun JsonObject.optionalNumber(key: String): Int? {
+    val value = get(key) ?: return null
+    if (value.isJsonNull) return null
+    if (!value.isJsonPrimitive || !value.asJsonPrimitive.isNumber) {
+        throw GatewayException("Invalid desktop integer '$key'.")
+    }
+    return value.asString.toIntOrNull() ?: throw GatewayException("Invalid desktop integer '$key'.")
+}
+
 private fun JsonObject.bool(key: String): Boolean {
     val value = get(key)
     if (value == null || !value.isJsonPrimitive || !value.asJsonPrimitive.isBoolean) {
@@ -468,19 +613,121 @@ private fun JsonObject.transcriptEntry(): TranscriptEntry {
     val planEntries = optionalObjects("entries").map {
         PlanEntry(it.string("text"), it.string("status"))
     }
+    val content = optionalStrings("content")
+    val rawOutput = optionalValue("raw_output")
     return TranscriptEntry(
         index = number("index"),
         kind = kind,
         text = optionalString("text"),
         chunks = chunks,
         toolCallId = optionalString("tool_call_id"),
+        // Older desktops embedded output in snapshots. Prefer new compact metadata, but preserve
+        // this fallback while a paired desktop and phone are upgraded at different times.
+        detailsAvailable = optionalBoolean("details_available") ?: (rawOutput != null || content.isNotEmpty()),
         title = optionalString("title"),
         toolName = optionalString("tool_name"),
         status = optionalString("status"),
-        content = optionalStrings("content"),
+        content = content,
         rawInput = optionalValue("raw_input"),
-        rawOutput = optionalValue("raw_output"),
+        rawOutput = rawOutput,
         planEntries = planEntries,
+        elicitationId = optionalString("elicitation_id"),
+    )
+}
+
+private fun JsonObject.elicitation(): Elicitation {
+    val mode = string("mode")
+    val schema = get("schema")?.takeIf { it.isJsonObject }?.asJsonObject
+    return Elicitation(
+        id = string("elicitation_id"),
+        message = string("message"),
+        mode = mode,
+        url = optionalString("url"),
+        fields = schema?.let(::elicitationFields).orEmpty(),
+    )
+}
+
+/**
+ * Reads the subset of JSON Schema the Agent protocol allows for questions. Desktop validates the
+ * answer again, so an unknown property type is skipped rather than guessed at.
+ */
+internal fun elicitationFields(schema: JsonObject): List<ElicitationField> {
+    val properties = schema.get("properties")?.takeIf { it.isJsonObject }?.asJsonObject ?: return emptyList()
+    val required = schema.get("required")?.takeIf { it.isJsonArray }?.asJsonArray
+        ?.mapNotNull { element -> element.takeIf { it.isJsonPrimitive }?.asString }
+        .orEmpty()
+        .toSet()
+    return properties.entrySet().mapNotNull { (name, element) ->
+        val property = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+        val title = property.textOrNull("title") ?: name
+        val description = property.textOrNull("description")
+        val isRequired = name in required
+        when (property.textOrNull("type")) {
+            "string" -> {
+                val choices = property.choices("oneOf") ?: property.enumChoices("enum")
+                if (choices.isNullOrEmpty()) {
+                    ElicitationField(name, title, description, ElicitationFieldType.TEXT, isRequired,
+                        defaultText = property.textOrNull("default"))
+                } else {
+                    ElicitationField(name, title, description, ElicitationFieldType.SINGLE_SELECT, isRequired,
+                        choices = choices, defaultText = property.textOrNull("default"))
+                }
+            }
+            "number", "integer" -> ElicitationField(
+                name, title, description,
+                if (property.textOrNull("type") == "integer") ElicitationFieldType.INTEGER else ElicitationFieldType.NUMBER,
+                isRequired,
+                defaultText = property.get("default")?.takeIf { it.isJsonPrimitive }?.asString,
+            )
+            "boolean" -> ElicitationField(name, title, description, ElicitationFieldType.BOOLEAN, isRequired,
+                defaultBoolean = property.get("default")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }?.asBoolean)
+            "array" -> {
+                val items = property.get("items")?.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                val choices = items.choices("anyOf") ?: items.enumChoices("enum") ?: return@mapNotNull null
+                ElicitationField(name, title, description, ElicitationFieldType.MULTI_SELECT, isRequired,
+                    choices = choices,
+                    defaultChoices = property.get("default")?.takeIf { it.isJsonArray }?.asJsonArray
+                        ?.mapNotNull { item -> item.takeIf { it.isJsonPrimitive }?.asString }.orEmpty())
+            }
+            else -> null
+        }
+    }
+}
+
+private fun JsonObject.textOrNull(key: String): String? =
+    get(key)?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+
+private fun JsonObject.choices(key: String): List<ElicitationChoice>? =
+    get(key)?.takeIf { it.isJsonArray }?.asJsonArray?.mapNotNull { element ->
+        val option = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+        val value = option.textOrNull("const") ?: return@mapNotNull null
+        ElicitationChoice(value, option.textOrNull("title") ?: value, option.textOrNull("description"))
+    }
+
+private fun JsonObject.enumChoices(key: String): List<ElicitationChoice>? =
+    get(key)?.takeIf { it.isJsonArray }?.asJsonArray?.mapNotNull { element ->
+        element.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString?.let { ElicitationChoice(it, it) }
+    }
+
+private fun JsonObject.toolDetails(): ToolDetails {
+    val toolCallId = string("tool_call_id")
+    val status = string("status")
+    val available = bool("available")
+    if (!available) {
+        return ToolDetails(toolCallId = toolCallId, status = status, available = false)
+    }
+
+    val format = string("format")
+    if (format != "markdown") {
+        throw GatewayException("Unsupported desktop tool output format '$format'.")
+    }
+    return ToolDetails(
+        toolCallId = toolCallId,
+        status = status,
+        available = true,
+        format = format,
+        output = string("output"),
+        truncated = bool("truncated"),
     )
 }
 

@@ -4,13 +4,113 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.zeddesktop.mobile.BuildConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 enum class Page { PAIR, PROJECTS, THREADS, CHAT, CHANGES, SETTINGS }
+
+enum class TurnPhase {
+    IDLE,
+    SENDING,
+    RUNNING,
+    AWAITING_APPROVAL,
+    CANCELLING,
+    COMPLETED,
+    FAILED;
+
+    val isActive: Boolean
+        get() = when (this) {
+            SENDING, RUNNING, AWAITING_APPROVAL, CANCELLING -> true
+            IDLE, COMPLETED, FAILED -> false
+        }
+
+    val canCancel: Boolean
+        get() = this == RUNNING || this == AWAITING_APPROVAL
+}
+
+typealias ChatTurnPhase = TurnPhase
+
+enum class PendingMessageStatus { SENDING, SENT, FAILED }
+
+data class PendingMessage(
+    val text: String,
+    val status: PendingMessageStatus = PendingMessageStatus.SENDING,
+    val error: String? = null,
+    val localId: Long = 0,
+    /** Avoids acknowledging a newly sent duplicate from an older matching transcript entry. */
+    val observedUserMessageCount: Int = 0,
+)
+
+data class ChatTurnState(
+    val phase: TurnPhase = TurnPhase.IDLE,
+    val error: String? = null,
+) {
+    val isActive: Boolean get() = phase.isActive
+    val canCancel: Boolean get() = phase.canCancel
+}
+
+data class ComposerState(
+    val draft: String = "",
+    val pendingMessage: PendingMessage? = null,
+)
+
+data class ApprovalState(
+    val approvals: List<ToolApproval> = emptyList(),
+    val resolvingToolCallIds: Set<String> = emptySet(),
+    val errorsByToolCallId: Map<String, String> = emptyMap(),
+)
+
+/** Questions the Agent is waiting on in the open thread. */
+data class QuestionState(
+    val elicitations: List<Elicitation> = emptyList(),
+    val answeringIds: Set<String> = emptySet(),
+    val errorsById: Map<String, String> = emptyMap(),
+)
+
+/** Keep/Reject review of the Agent's unreviewed edits, plus any diff pages loaded on demand. */
+data class ReviewState(
+    val unreviewedFiles: List<String> = emptyList(),
+    val canUndoReject: Boolean = false,
+    val reviewing: Boolean = false,
+    val error: String? = null,
+    val notice: String? = null,
+    /** Paged diff text for files whose diff was too large to embed in the changes list. */
+    val diffPages: Map<String, DiffPage> = emptyMap(),
+    val loadingDiffPaths: Set<String> = emptySet(),
+)
+
+/** Older transcript pages the user scrolled back to; polling only refreshes the newest page. */
+data class TranscriptHistoryState(
+    val earlierEntries: List<TranscriptEntry> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+)
+
+data class ConfigurationState(
+    val models: List<ModelCapability> = emptyList(),
+    val configuration: ThreadConfiguration? = null,
+    val isLoadingModels: Boolean = false,
+    val isSavingConfiguration: Boolean = false,
+    val error: String? = null,
+) {
+    val isLoading: Boolean get() = isLoadingModels
+    val isSaving: Boolean get() = isSavingConfiguration
+}
+
+/** Thread-scoped only: tool output is held in memory and is never persisted. */
+data class ToolDetailsKey(val threadId: String, val toolCallId: String)
+
+data class ToolDetailsState(
+    val cache: Map<ToolDetailsKey, ToolDetails> = emptyMap(),
+    val loading: Set<ToolDetailsKey> = emptySet(),
+    val errors: Map<ToolDetailsKey, String> = emptyMap(),
+)
+
 data class MobileState(
     val page: Page = Page.PAIR,
     val host: String = "",
@@ -24,16 +124,43 @@ data class MobileState(
     val selectedThread: ThreadSummary? = null,
     val snapshot: ThreadSnapshot? = null,
     val files: List<ChangedFile> = emptyList(),
-    val approvals: List<ToolApproval> = emptyList(),
-    val models: List<ModelCapability> = emptyList(),
-    val configuration: ThreadConfiguration? = null,
-    val draft: String = "",
+    val turn: ChatTurnState = ChatTurnState(),
+    val composer: ComposerState = ComposerState(),
+    val approval: ApprovalState = ApprovalState(),
+    val questions: QuestionState = QuestionState(),
+    val review: ReviewState = ReviewState(),
+    val history: TranscriptHistoryState = TranscriptHistoryState(),
+    val configurationState: ConfigurationState = ConfigurationState(),
+    val toolDetails: ToolDetailsState = ToolDetailsState(),
     val busy: Boolean = false,
     val error: String? = null,
     val pollError: String? = null,
     val notice: String? = null,
     val lastUpdated: Long? = null,
-)
+) {
+    // Existing composables read these values directly; chat mutations use the scoped state above.
+    val draft: String get() = composer.draft
+    val pendingMessage: PendingMessage? get() = composer.pendingMessage
+    val turnPhase: TurnPhase get() = turn.phase
+    val approvals: List<ToolApproval> get() = approval.approvals
+
+    /** Older pages joined to the polled newest page, without duplicating overlapping entries. */
+    val fullTranscript: List<TranscriptEntry>
+        get() {
+            val latest = snapshot?.transcript.orEmpty()
+            val firstLatestIndex = latest.firstOrNull()?.index ?: Int.MAX_VALUE
+            return history.earlierEntries.filter { it.index < firstLatestIndex } + latest
+        }
+
+    /** Number of entries still older than anything loaded. */
+    val olderTranscriptEntries: Int
+        get() = history.earlierEntries.firstOrNull()?.index ?: snapshot?.transcriptOmittedEntries ?: 0
+    val resolvingToolCallIds: Set<String> get() = approval.resolvingToolCallIds
+    val models: List<ModelCapability> get() = configurationState.models
+    val configuration: ThreadConfiguration? get() = configurationState.configuration
+    val isLoadingModels: Boolean get() = configurationState.isLoadingModels
+    val isSavingConfiguration: Boolean get() = configurationState.isSavingConfiguration
+}
 
 /**
  * v1 host/token sessions remain ephemeral. v2 QR claims use an injectable [CredentialStore] so
@@ -57,13 +184,28 @@ class ZedViewModel(
     private var repository: ZedRepository? = null
     private var activeV2Credential: DeviceCredential? = null
     private var epoch = 0L
+    private var chatEpoch = 0L
+    private var turnRevision = 0L
+    private var configurationRevision = 0L
+    private var nextPendingMessageId = 0L
     private var action: Job? = null
+    private var sendJob: Job? = null
+    private var cancelJob: Job? = null
+    private var modelsJob: Job? = null
+    private var configurationJob: Job? = null
+    private val approvalJobs = mutableMapOf<String, Job>()
+    private val questionJobs = mutableMapOf<String, Job>()
+    private var reviewJob: Job? = null
+    private var historyJob: Job? = null
+    private val diffPageJobs = mutableMapOf<String, Job>()
+    private val toolDetailsJobs = mutableMapOf<ToolDetailsKey, Job>()
 
     /** Existing manual host/token flow. This is retained as the v1 fallback. */
     fun pair(host: String, token: String) = task {
         val candidate = connect(host, token)
         candidate.checkStatus()
         val projects = candidate.projects()
+        beginChatSession()
         activeV2Credential = null
         repository = candidate
         mutable.value = MobileState(
@@ -83,6 +225,7 @@ class ZedViewModel(
         // A newly claimed device must never inherit a catalog from another credential binding.
         val cachedProjects = loadCachedProjects(credential)
         credentialStore.save(credential)
+        beginChatSession()
         activeV2Credential = credential
         repository = candidate
         mutable.value = MobileState(
@@ -110,6 +253,7 @@ class ZedViewModel(
         }
         activeV2Credential = credential
         val cachedProjects = loadCachedProjects(credential)
+        beginChatSession()
         mutable.value = MobileState(
             page = Page.PROJECTS,
             host = credential.origin.trim(),
@@ -138,6 +282,7 @@ class ZedViewModel(
     /** Removes this phone's local v2 credential and its credential-bound UI-only project catalog. */
     fun disconnect() {
         epoch++
+        beginChatSession()
         action?.cancel()
         repository = null
         activeV2Credential = null
@@ -166,6 +311,7 @@ class ZedViewModel(
             )
             return
         }
+        beginChatSession()
         task {
             val repo = requireNotNull(repository)
             // The catalog ID is opaque and desktop-owned. Never send a phone path or retry the POST.
@@ -178,6 +324,10 @@ class ZedViewModel(
                 threads = threads,
                 selectedThread = null,
                 snapshot = null,
+                turn = ChatTurnState(),
+                composer = ComposerState(),
+                approval = ApprovalState(),
+                configurationState = ConfigurationState(),
                 notice = if (project.isOpen) null else "Opened on Desktop. Your Agent threads are ready.",
             )
         }
@@ -219,14 +369,15 @@ class ZedViewModel(
 
     fun openThread(thread: ThreadSummary) {
         if (mutable.value.busy) return
+        beginChatSession()
         navigate(Page.CHAT)
         mutable.value = mutable.value.copy(
             selectedThread = thread,
             snapshot = null,
-            approvals = emptyList(),
-            models = emptyList(),
-            configuration = null,
-            draft = "",
+            turn = ChatTurnState(),
+            composer = ComposerState(),
+            approval = ApprovalState(),
+            configurationState = ConfigurationState(),
             lastUpdated = null,
         )
         // The visible chat owns the first fetch and subsequent lifecycle-aware polling.
@@ -236,51 +387,203 @@ class ZedViewModel(
         val project = mutable.value.project ?: return
         task {
             val thread = requireNotNull(repository).createThread(project.id)
+            beginChatSession()
             mutable.value = mutable.value.copy(
-                page = Page.CHAT, selectedThread = thread, snapshot = null,
-                approvals = emptyList(), models = emptyList(), configuration = null, draft = "", lastUpdated = null,
-                notice = "Thread created. Send your first prompt."
+                page = Page.CHAT,
+                selectedThread = thread,
+                snapshot = null,
+                turn = ChatTurnState(),
+                composer = ComposerState(),
+                approval = ApprovalState(),
+                configurationState = ConfigurationState(),
+                lastUpdated = null,
+                notice = "Thread created. Send your first prompt.",
             )
         }
     }
 
     fun editDraft(text: String) {
-        mutable.value = mutable.value.copy(draft = text)
+        val current = mutable.value
+        mutable.value = current.copy(composer = current.composer.copy(draft = text))
     }
 
     fun send() {
-        val id = mutable.value.selectedThread?.id ?: return
-        val text = mutable.value.draft
-        if (text.isBlank()) return
-        task {
-            requireNotNull(repository).send(id, text)
-            mutable.value = mutable.value.copy(draft = "", notice = "Prompt accepted. Waiting for desktop…")
+        val current = mutable.value
+        val id = current.selectedThread?.id ?: return
+        val text = current.composer.draft
+        if (text.isBlank() || current.turn.isActive) return
+        val repo = repository ?: return
+        val session = chatEpoch
+        val pendingId = ++nextPendingMessageId
+        val pendingMessage = PendingMessage(
+            text = text,
+            localId = pendingId,
+            observedUserMessageCount = current.snapshot?.messages?.count { it.isUserMessage(text) } ?: 0,
+        )
+
+        turnRevision++
+        mutable.value = current.copy(
+            turn = ChatTurnState(phase = TurnPhase.SENDING),
+            composer = current.composer.copy(draft = "", pendingMessage = pendingMessage),
+        )
+        sendJob = viewModelScope.launch {
+            try {
+                repo.send(id, text)
+                updateCurrentChat(id, session) { latest ->
+                    val latestPending = latest.composer.pendingMessage
+                    if (latestPending?.localId != pendingId) {
+                        latest
+                    } else {
+                        turnRevision++
+                        latest.copy(
+                            turn = ChatTurnState(phase = TurnPhase.RUNNING),
+                            composer = latest.composer.copy(
+                                pendingMessage = latestPending.copy(
+                                    status = PendingMessageStatus.SENT,
+                                    error = null,
+                                ),
+                            ),
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (isCurrentChat(id, session) && activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else {
+                    markSendFailed(id, session, pendingId, text, message(error))
+                }
+            } catch (error: Exception) {
+                markSendFailed(id, session, pendingId, text, message(error))
+            }
         }
     }
 
     fun cancel() {
-        val id = mutable.value.selectedThread?.id ?: return
-        task {
-            requireNotNull(repository).cancel(id)
-            mutable.value = mutable.value.copy(notice = "Cancellation requested. Desktop status will update shortly.")
+        val current = mutable.value
+        val id = current.selectedThread?.id ?: return
+        if (!current.turn.canCancel) return
+        val repo = repository ?: return
+        val session = chatEpoch
+        val previousPhase = current.turn.phase
+        val revision = ++turnRevision
+
+        mutable.value = current.copy(
+            turn = current.turn.copy(phase = TurnPhase.CANCELLING, error = null),
+        )
+        cancelJob = viewModelScope.launch {
+            try {
+                repo.cancel(id)
+                updateCurrentChat(id, session) { latest ->
+                    if (turnRevision != revision) {
+                        latest
+                    } else {
+                        turnRevision++
+                        latest.copy(turn = latest.turn.copy(phase = TurnPhase.CANCELLING, error = null))
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (isCurrentChat(id, session) && activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else {
+                    markCancelFailed(id, session, revision, previousPhase, message(error))
+                }
+            } catch (error: Exception) {
+                markCancelFailed(id, session, revision, previousPhase, message(error))
+            }
         }
+    }
+
+    /**
+     * Fetches full output only after an explicit tool-card interaction. Concurrent requests for
+     * the same thread/tool pair share one in-flight call; completed results remain in-memory only.
+     */
+    fun loadToolDetails(toolCallId: String, retry: Boolean = false) {
+        val current = mutable.value
+        val threadId = current.selectedThread?.id ?: return
+        if (current.page != Page.CHAT || toolCallId.isBlank()) return
+        // Tool IDs are desktop-owned opaque values. Confirm the visible transcript supplied this
+        // ID before making a scoped detail request so future callers cannot use this as arbitrary
+        // API access.
+        if (current.snapshot?.transcript?.any { it.toolCallId == toolCallId } != true) return
+        val key = ToolDetailsKey(threadId, toolCallId)
+        if (key in current.toolDetails.loading || (!retry && key in current.toolDetails.cache)) return
+        val repo = repository ?: return
+        val version = epoch
+        val session = chatEpoch
+
+        mutable.value = current.copy(
+            toolDetails = current.toolDetails.copy(
+                loading = current.toolDetails.loading + key,
+                errors = current.toolDetails.errors - key,
+            ),
+        )
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val details = repo.toolDetails(threadId, toolCallId)
+                if (details.toolCallId != toolCallId) {
+                    throw GatewayException("Desktop returned detailed output for a different tool call.")
+                }
+                updateCurrentToolDetails(threadId, version, session) { latest ->
+                    // A new snapshot can replace a completed/compacted transcript while this
+                    // request is in flight. Never retain output for a tool that is no longer shown.
+                    if (latest.snapshot?.transcript?.any { it.toolCallId == toolCallId } != true) {
+                        latest.copy(
+                            toolDetails = latest.toolDetails.copy(
+                                loading = latest.toolDetails.loading - key,
+                                errors = latest.toolDetails.errors - key,
+                            ),
+                        )
+                    } else {
+                        latest.copy(
+                            toolDetails = latest.toolDetails.copy(
+                                cache = latest.toolDetails.cache + (key to details),
+                                loading = latest.toolDetails.loading - key,
+                                errors = latest.toolDetails.errors - key,
+                            ),
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (isCurrentChatPage(threadId, version, session) && activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else {
+                    markToolDetailsFailed(threadId, version, session, key, message(error))
+                }
+            } catch (error: Exception) {
+                markToolDetailsFailed(threadId, version, session, key, message(error))
+            } finally {
+                if (toolDetailsJobs[key] == currentCoroutineContext()[Job]) {
+                    toolDetailsJobs.remove(key)
+                }
+            }
+        }
+        toolDetailsJobs[key] = job
+        job.start()
     }
 
     fun showChanges() {
         if (mutable.value.busy) return
         navigate(Page.CHANGES)
-        mutable.value = mutable.value.copy(files = emptyList())
+        mutable.value = mutable.value.copy(files = emptyList(), review = ReviewState())
         refresh()
     }
 
     fun showProjects() {
         if (mutable.value.busy) return
+        if (mutable.value.page == Page.CHAT) beginChatSession()
         navigate(Page.PROJECTS)
         refresh()
     }
 
     fun showThreads() {
         if (mutable.value.busy || mutable.value.project == null) return
+        if (mutable.value.page == Page.CHAT) beginChatSession()
         navigate(Page.THREADS)
         refresh()
     }
@@ -299,13 +602,16 @@ class ZedViewModel(
         when (mutable.value.page) {
             Page.CHANGES -> navigate(Page.CHAT)
             Page.CHAT -> {
+                beginChatSession()
                 navigate(Page.THREADS); mutable.value =
                     mutable.value.copy(
-                        draft = "",
                         snapshot = null,
-                        approvals = emptyList(),
-                        models = emptyList(),
-                        configuration = null,
+                        turn = ChatTurnState(),
+                        composer = ComposerState(),
+                        approval = ApprovalState(),
+                        questions = QuestionState(),
+                        history = TranscriptHistoryState(),
+                        configurationState = ConfigurationState(),
                         selectedThread = null,
                     ); refresh()
             }
@@ -335,8 +641,18 @@ class ZedViewModel(
                     Page.THREADS -> mutable.value =
                         mutable.value.copy(threads = repo.threads(requireNotNull(current.project).id))
 
-                    Page.CHANGES -> mutable.value =
-                        mutable.value.copy(files = repo.changes(requireNotNull(current.selectedThread).id))
+                    Page.CHANGES -> {
+                        val changes = repo.changesSnapshot(requireNotNull(current.selectedThread).id)
+                        mutable.value = mutable.value.copy(
+                            files = changes.files,
+                            review = mutable.value.review.copy(
+                                unreviewedFiles = changes.unreviewedFiles,
+                                canUndoReject = changes.canUndoReject,
+                                // Diff text may have changed, so drop pages loaded for older text.
+                                diffPages = emptyMap(),
+                            ),
+                        )
+                    }
 
                     else -> Unit
                 }
@@ -366,49 +682,332 @@ class ZedViewModel(
         val id = current.selectedThread?.id ?: return
         val repo = repository ?: return
         val version = epoch
+        val session = chatEpoch
+        val observedTurnRevision = turnRevision
+        val observedConfigurationRevision = configurationRevision
         try {
             val snapshot = repo.thread(id)
-            val approvals = runCatching { repo.approvals(id) }.getOrElse { error ->
-                if (error is GatewayException && (
-                            error.message?.contains("Remote tool approvals are disabled") == true ||
-                                    error.message?.contains("requires Zed-Desktop Mobile Gateway API v2") == true
-                            )
-                ) {
-                    emptyList()
-                } else {
-                    throw error
-                }
+            val approvals = try {
+                repo.approvals(id)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayException) {
+                if (approvalsUnavailable(error)) emptyList() else throw error
             }
-            val configuration = runCatching { repo.configuration(id) }.getOrNull()
-            if (version == epoch && mutable.value.page == Page.CHAT && mutable.value.selectedThread?.id == id) {
-                mutable.value = mutable.value.copy(
+            val elicitations = try {
+                repo.elicitations(id)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                throw error
+            } catch (_: GatewayException) {
+                // Desktops from before phone questions existed simply have none to answer here.
+                emptyList()
+            }
+            val configuration = try {
+                repo.configuration(id)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            if (isCurrentChatPage(id, version, session)) {
+                val latest = mutable.value
+                val pendingMessage = latest.composer.pendingMessage
+                val pendingWasObserved = pendingMessage != null &&
+                        snapshot.messages.count { it.isUserMessage(pendingMessage.text) } >
+                        pendingMessage.observedUserMessageCount
+                val nextConfiguration = when {
+                    latest.configurationState.isSavingConfiguration -> latest.configurationState
+                    configurationRevision != observedConfigurationRevision -> latest.configurationState
+                    configuration == null -> latest.configurationState
+                    else -> latest.configurationState.copy(configuration = configuration, error = null)
+                }
+                val approvalIds = approvals.mapTo(mutableSetOf()) { it.toolCallId }
+                val elicitationIds = elicitations.mapTo(mutableSetOf()) { it.id }
+                val derivedTurnPhase = deriveTurnPhase(snapshot.status, approvals, elicitations)
+                val nextTurn = if (
+                    turnRevision == observedTurnRevision &&
+                    !shouldPreserveLocalTurn(
+                        current = latest.turn,
+                        pendingMessage = pendingMessage,
+                        pendingWasObserved = pendingWasObserved,
+                        derived = derivedTurnPhase,
+                    )
+                ) {
+                    ChatTurnState(phase = derivedTurnPhase)
+                } else {
+                    latest.turn
+                }
+                mutable.value = latest.copy(
                     snapshot = snapshot,
-                    approvals = approvals,
-                    configuration = configuration,
+                    turn = nextTurn,
+                    composer = if (pendingWasObserved) {
+                        latest.composer.copy(pendingMessage = null)
+                    } else {
+                        latest.composer
+                    },
+                    approval = latest.approval.copy(
+                        approvals = approvals,
+                        resolvingToolCallIds = latest.approval.resolvingToolCallIds.intersect(approvalIds),
+                        errorsByToolCallId = latest.approval.errorsByToolCallId.filterKeys { it in approvalIds },
+                    ),
+                    questions = latest.questions.copy(
+                        elicitations = elicitations,
+                        answeringIds = latest.questions.answeringIds.intersect(elicitationIds),
+                        errorsById = latest.questions.errorsById.filterKeys { it in elicitationIds },
+                    ),
+                    configurationState = nextConfiguration,
                     pollError = null,
                     lastUpdated = System.currentTimeMillis(),
                 )
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: GatewayAuthenticationException) {
-            if (activeV2Credential != null) {
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: GatewayAuthenticationException) {
+            if (isCurrentChatPage(id, version, session) && activeV2Credential != null) {
                 handleRevokedCredential()
-            } else if (version == epoch && mutable.value.page == Page.CHAT) {
-                mutable.value = mutable.value.copy(pollError = message(e))
+            } else if (isCurrentChatPage(id, version, session)) {
+                mutable.value = mutable.value.copy(pollError = message(error))
             }
-        } catch (e: Exception) {
-            if (version == epoch && mutable.value.page == Page.CHAT) mutable.value =
-                mutable.value.copy(pollError = message(e))
+        } catch (error: Exception) {
+            if (isCurrentChatPage(id, version, session)) {
+                mutable.value = mutable.value.copy(pollError = message(error))
+            }
         }
     }
 
-    fun resolveApproval(toolCallId: String, allow: Boolean) {
-        val threadId = mutable.value.selectedThread?.id ?: return
-        task {
-            requireNotNull(repository).resolveApproval(threadId, toolCallId, allow)
-            mutable.value =
-                mutable.value.copy(notice = if (allow) "Tool approved on this phone." else "Tool denied on this phone.")
+    fun resolveApproval(toolCallId: String, allow: Boolean) =
+        submitApproval(toolCallId) { repo, threadId -> repo.resolveApproval(threadId, toolCallId, allow) }
+
+    /** Sends one of the desktop's own options, such as "Always allow" or a pattern-scoped rule. */
+    fun resolveApproval(toolCallId: String, decision: ApprovalDecision) {
+        val approval = mutable.value.approval.approvals.firstOrNull { it.toolCallId == toolCallId } ?: return
+        val option = approval.options.firstOrNull { it.optionId == decision.optionId } ?: return
+        if (!option.enabled) return
+        submitApproval(toolCallId) { repo, threadId -> repo.resolveApproval(threadId, toolCallId, decision) }
+    }
+
+    private fun submitApproval(
+        toolCallId: String,
+        send: suspend (ZedRepository, String) -> Unit,
+    ) {
+        val current = mutable.value
+        val threadId = current.selectedThread?.id ?: return
+        if (toolCallId in current.approval.resolvingToolCallIds) return
+        val repo = repository ?: return
+        val session = chatEpoch
+
+        mutable.value = current.copy(
+            approval = current.approval.copy(
+                resolvingToolCallIds = current.approval.resolvingToolCallIds + toolCallId,
+                errorsByToolCallId = current.approval.errorsByToolCallId - toolCallId,
+            ),
+        )
+        approvalJobs[toolCallId] = viewModelScope.launch {
+            var decisionAccepted = false
+            try {
+                send(repo, threadId)
+                decisionAccepted = true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (isCurrentChat(threadId, session) && activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else {
+                    markApprovalFailed(threadId, session, toolCallId, message(error))
+                }
+            } catch (error: Exception) {
+                markApprovalFailed(threadId, session, toolCallId, message(error))
+            } finally {
+                if (!decisionAccepted) {
+                    updateCurrentChat(threadId, session) { latest ->
+                        latest.copy(
+                            approval = latest.approval.copy(
+                                resolvingToolCallIds = latest.approval.resolvingToolCallIds - toolCallId,
+                            ),
+                        )
+                    }
+                }
+                approvalJobs.remove(toolCallId)
+            }
+        }
+    }
+
+    /** Answers, declines or cancels a question the Agent asked. Desktop validates the answer. */
+    fun answerElicitation(
+        elicitationId: String,
+        action: String,
+        values: Map<String, ElicitationValue> = emptyMap(),
+    ) {
+        val current = mutable.value
+        val threadId = current.selectedThread?.id ?: return
+        if (elicitationId in current.questions.answeringIds) return
+        val repo = repository ?: return
+        val session = chatEpoch
+
+        mutable.value = current.copy(
+            questions = current.questions.copy(
+                answeringIds = current.questions.answeringIds + elicitationId,
+                errorsById = current.questions.errorsById - elicitationId,
+            ),
+        )
+        questionJobs[elicitationId] = viewModelScope.launch {
+            var answered = false
+            try {
+                repo.answerElicitation(threadId, elicitationId, action, values)
+                answered = true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (isCurrentChat(threadId, session) && activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else {
+                    markQuestionFailed(threadId, session, elicitationId, message(error))
+                }
+            } catch (error: Exception) {
+                markQuestionFailed(threadId, session, elicitationId, message(error))
+            } finally {
+                if (!answered) {
+                    updateCurrentChat(threadId, session) { latest ->
+                        latest.copy(
+                            questions = latest.questions.copy(
+                                answeringIds = latest.questions.answeringIds - elicitationId,
+                            ),
+                        )
+                    }
+                }
+                questionJobs.remove(elicitationId)
+            }
+        }
+    }
+
+    /** Keeps or rejects the Agent's unreviewed edits; [paths] null means every unreviewed file. */
+    fun reviewChanges(keep: Boolean, paths: List<String>? = null) =
+        runReview(if (keep) "Kept the Agent's edits." else "Rejected the Agent's edits. You can undo this.") { repo, id ->
+            repo.reviewChanges(id, keep, paths)
+        }
+
+    fun undoReject() = runReview("Restored the rejected edits.") { repo, id -> repo.undoReject(id) }
+
+    private fun runReview(successNotice: String, action: suspend (ZedRepository, String) -> Unit) {
+        val current = mutable.value
+        if (current.page != Page.CHANGES || current.review.reviewing) return
+        val threadId = current.selectedThread?.id ?: return
+        val repo = repository ?: return
+        val version = epoch
+        mutable.value = current.copy(review = current.review.copy(reviewing = true, error = null, notice = null))
+        reviewJob = viewModelScope.launch {
+            try {
+                action(repo, threadId)
+                val changes = repo.changesSnapshot(threadId)
+                if (version == epoch) {
+                    mutable.value = mutable.value.copy(
+                        files = changes.files,
+                        review = mutable.value.review.copy(
+                            unreviewedFiles = changes.unreviewedFiles,
+                            canUndoReject = changes.canUndoReject,
+                            reviewing = false,
+                            notice = successNotice,
+                            diffPages = emptyMap(),
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else if (version == epoch) {
+                    mutable.value = mutable.value.copy(
+                        review = mutable.value.review.copy(reviewing = false, error = message(error)),
+                    )
+                }
+            } catch (error: Exception) {
+                if (version == epoch) {
+                    mutable.value = mutable.value.copy(
+                        review = mutable.value.review.copy(reviewing = false, error = message(error)),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Loads the next page of a diff that was too large to embed in the changes list. */
+    fun loadDiffPage(path: String) {
+        val current = mutable.value
+        if (current.page != Page.CHANGES || path in current.review.loadingDiffPaths) return
+        val threadId = current.selectedThread?.id ?: return
+        val repo = repository ?: return
+        val existing = current.review.diffPages[path]
+        val offset = when {
+            existing == null -> 0
+            existing.nextOffset == null -> return
+            else -> existing.nextOffset
+        }
+        val version = epoch
+        mutable.value = current.copy(
+            review = current.review.copy(loadingDiffPaths = current.review.loadingDiffPaths + path, error = null),
+        )
+        diffPageJobs[path] = viewModelScope.launch {
+            try {
+                val page = repo.changedFilePage(threadId, path, offset)
+                if (version == epoch) {
+                    val review = mutable.value.review
+                    val merged = review.diffPages[path]?.let { previous ->
+                        page.copy(offset = previous.offset, diff = previous.diff + page.diff)
+                    } ?: page
+                    mutable.value = mutable.value.copy(
+                        review = review.copy(
+                            diffPages = review.diffPages + (path to merged),
+                            loadingDiffPaths = review.loadingDiffPaths - path,
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (version == epoch) {
+                    val review = mutable.value.review
+                    mutable.value = mutable.value.copy(
+                        review = review.copy(loadingDiffPaths = review.loadingDiffPaths - path, error = message(error)),
+                    )
+                }
+            } finally {
+                diffPageJobs.remove(path)
+            }
+        }
+    }
+
+    /** Fetches the page of transcript entries just before the oldest one shown. */
+    fun loadOlderTranscript() {
+        val current = mutable.value
+        val threadId = current.selectedThread?.id ?: return
+        if (current.history.loading || current.olderTranscriptEntries <= 0) return
+        val before = current.fullTranscript.firstOrNull()?.index ?: return
+        val repo = repository ?: return
+        val session = chatEpoch
+        mutable.value = current.copy(history = current.history.copy(loading = true, error = null))
+        historyJob = viewModelScope.launch {
+            try {
+                val page = repo.olderTranscript(threadId, before)
+                updateCurrentChat(threadId, session) { latest ->
+                    latest.copy(
+                        history = latest.history.copy(
+                            earlierEntries = page.entries + latest.history.earlierEntries,
+                            loading = false,
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                updateCurrentChat(threadId, session) { latest ->
+                    latest.copy(history = latest.history.copy(loading = false, error = message(error)))
+                }
+            }
         }
     }
 
@@ -418,29 +1017,324 @@ class ZedViewModel(
         thinkingEffort: String? = null,
         clearThinkingEffort: Boolean = false,
     ) {
-        val threadId = mutable.value.selectedThread?.id ?: return
-        task {
-            val configuration = requireNotNull(repository).updateConfiguration(
-                id = threadId,
-                model = model,
-                thinkingEnabled = thinkingEnabled,
-                thinkingEffort = thinkingEffort,
-                clearThinkingEffort = clearThinkingEffort,
-            )
-            mutable.value = mutable.value.copy(configuration = configuration, notice = "Thread configuration updated.")
+        val current = mutable.value
+        val threadId = current.selectedThread?.id ?: return
+        if (current.turn.isActive || current.configurationState.isSavingConfiguration) return
+        val repo = repository ?: return
+        val session = chatEpoch
+        val revision = ++configurationRevision
+
+        mutable.value = current.copy(
+            configurationState = current.configurationState.copy(
+                isSavingConfiguration = true,
+                error = null,
+            ),
+        )
+        configurationJob = viewModelScope.launch {
+            try {
+                val configuration = repo.updateConfiguration(
+                    id = threadId,
+                    model = model,
+                    thinkingEnabled = thinkingEnabled,
+                    thinkingEffort = thinkingEffort,
+                    clearThinkingEffort = clearThinkingEffort,
+                )
+                updateCurrentChat(threadId, session) { latest ->
+                    if (configurationRevision != revision) {
+                        latest
+                    } else {
+                        configurationRevision++
+                        latest.copy(
+                            configurationState = latest.configurationState.copy(
+                                configuration = configuration,
+                                isSavingConfiguration = false,
+                                error = null,
+                            ),
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (isCurrentChat(threadId, session) && activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else {
+                    markConfigurationFailed(threadId, session, revision, message(error))
+                }
+            } catch (error: Exception) {
+                markConfigurationFailed(threadId, session, revision, message(error))
+            }
         }
     }
 
     fun loadModels() {
-        val projectId = mutable.value.project?.id ?: return
-        task {
-            val models = requireNotNull(repository).models(projectId)
-            mutable.value = mutable.value.copy(
-                models = models,
-                notice = if (models.isEmpty()) "No authenticated desktop models are available." else null,
+        val current = mutable.value
+        val projectId = current.project?.id ?: return
+        if (current.configurationState.isLoadingModels) return
+        val repo = repository ?: return
+        val session = chatEpoch
+
+        mutable.value = current.copy(
+            configurationState = current.configurationState.copy(isLoadingModels = true, error = null),
+        )
+        modelsJob = viewModelScope.launch {
+            try {
+                val models = repo.models(projectId)
+                updateCurrentProjectConfiguration(projectId, session) { latest ->
+                    latest.copy(
+                        configurationState = latest.configurationState.copy(
+                            models = models,
+                            isLoadingModels = false,
+                            error = null,
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (isCurrentProjectConfiguration(projectId, session) && activeV2Credential != null) {
+                    handleRevokedCredential()
+                } else {
+                    markModelLoadFailed(projectId, session, message(error))
+                }
+            } catch (error: Exception) {
+                markModelLoadFailed(projectId, session, message(error))
+            }
+        }
+    }
+
+    private fun markSendFailed(
+        threadId: String,
+        session: Long,
+        pendingId: Long,
+        text: String,
+        error: String,
+    ) = updateCurrentChat(threadId, session) { latest ->
+        val pendingMessage = latest.composer.pendingMessage
+        if (pendingMessage?.localId != pendingId) {
+            latest
+        } else {
+            turnRevision++
+            latest.copy(
+                turn = ChatTurnState(phase = TurnPhase.FAILED, error = error),
+                composer = latest.composer.copy(
+                    draft = latest.composer.draft.ifEmpty { text },
+                    pendingMessage = pendingMessage.copy(
+                        status = PendingMessageStatus.FAILED,
+                        error = error,
+                    ),
+                ),
             )
         }
     }
+
+    private fun markCancelFailed(
+        threadId: String,
+        session: Long,
+        revision: Long,
+        previousPhase: TurnPhase,
+        error: String,
+    ) = updateCurrentChat(threadId, session) { latest ->
+        if (turnRevision != revision || latest.turn.phase != TurnPhase.CANCELLING) {
+            latest
+        } else {
+            turnRevision++
+            latest.copy(turn = latest.turn.copy(phase = previousPhase, error = error))
+        }
+    }
+
+    private fun markApprovalFailed(threadId: String, session: Long, toolCallId: String, error: String) =
+        updateCurrentChat(threadId, session) { latest ->
+            if (toolCallId !in latest.approval.resolvingToolCallIds) {
+                latest
+            } else {
+                latest.copy(
+                    approval = latest.approval.copy(
+                        errorsByToolCallId = latest.approval.errorsByToolCallId + (toolCallId to error),
+                    ),
+                )
+            }
+        }
+
+    private fun markQuestionFailed(threadId: String, session: Long, elicitationId: String, error: String) =
+        updateCurrentChat(threadId, session) { latest ->
+            if (elicitationId !in latest.questions.answeringIds) {
+                latest
+            } else {
+                latest.copy(
+                    questions = latest.questions.copy(
+                        errorsById = latest.questions.errorsById + (elicitationId to error),
+                    ),
+                )
+            }
+        }
+
+    private fun markConfigurationFailed(threadId: String, session: Long, revision: Long, error: String) =
+        updateCurrentChat(threadId, session) { latest ->
+            if (configurationRevision != revision) {
+                latest
+            } else {
+                latest.copy(
+                    configurationState = latest.configurationState.copy(
+                        isSavingConfiguration = false,
+                        error = error,
+                    ),
+                )
+            }
+        }
+
+    private fun markToolDetailsFailed(
+        threadId: String,
+        version: Long,
+        session: Long,
+        key: ToolDetailsKey,
+        error: String,
+    ) = updateCurrentToolDetails(threadId, version, session) { latest ->
+        latest.copy(
+            toolDetails = latest.toolDetails.copy(
+                loading = latest.toolDetails.loading - key,
+                errors = latest.toolDetails.errors + (key to error),
+            ),
+        )
+    }
+
+    private fun markModelLoadFailed(projectId: String, session: Long, error: String) =
+        updateCurrentProjectConfiguration(projectId, session) { latest ->
+            latest.copy(
+                configurationState = latest.configurationState.copy(
+                    isLoadingModels = false,
+                    error = error,
+                ),
+            )
+        }
+
+    private fun updateCurrentChat(
+        threadId: String,
+        session: Long,
+        transform: (MobileState) -> MobileState,
+    ) {
+        if (isCurrentChat(threadId, session)) {
+            mutable.value = transform(mutable.value)
+        }
+    }
+
+    private fun isCurrentChat(threadId: String, session: Long): Boolean =
+        session == chatEpoch && mutable.value.selectedThread?.id == threadId
+
+    private fun updateCurrentToolDetails(
+        threadId: String,
+        version: Long,
+        session: Long,
+        transform: (MobileState) -> MobileState,
+    ) {
+        if (isCurrentChatPage(threadId, version, session)) {
+            mutable.value = transform(mutable.value)
+        }
+    }
+
+    private fun updateCurrentProjectConfiguration(
+        projectId: String,
+        session: Long,
+        transform: (MobileState) -> MobileState,
+    ) {
+        if (isCurrentProjectConfiguration(projectId, session)) {
+            mutable.value = transform(mutable.value)
+        }
+    }
+
+    private fun isCurrentProjectConfiguration(projectId: String, session: Long): Boolean =
+        session == chatEpoch && mutable.value.project?.id == projectId
+
+    private fun isCurrentChatPage(threadId: String, version: Long, session: Long): Boolean =
+        version == epoch && mutable.value.page == Page.CHAT && isCurrentChat(threadId, session)
+
+    private fun beginChatSession() {
+        invalidateChatSession()
+    }
+
+    private suspend fun invalidateChatSessionFromCurrentJob() {
+        invalidateChatSession(currentCoroutineContext()[Job])
+    }
+
+    private fun invalidateChatSession(excludedJob: Job? = null) {
+        chatEpoch++
+        turnRevision++
+        configurationRevision++
+
+        fun cancel(job: Job?) {
+            if (job != null && job != excludedJob) job.cancel()
+        }
+
+        cancel(sendJob)
+        cancel(cancelJob)
+        cancel(modelsJob)
+        cancel(configurationJob)
+        approvalJobs.values.forEach(::cancel)
+        questionJobs.values.forEach(::cancel)
+        toolDetailsJobs.values.forEach(::cancel)
+        cancel(historyJob)
+        sendJob = null
+        cancelJob = null
+        modelsJob = null
+        configurationJob = null
+        historyJob = null
+        approvalJobs.clear()
+        questionJobs.clear()
+        toolDetailsJobs.clear()
+        // Detailed output belongs only to the active in-memory chat session. It is deliberately
+        // discarded on every chat transition and is never written to a persistent store.
+        mutable.value = mutable.value.copy(
+            toolDetails = ToolDetailsState(),
+            questions = QuestionState(),
+            history = TranscriptHistoryState(),
+        )
+    }
+
+    private fun approvalsUnavailable(error: GatewayException): Boolean =
+        error.message?.contains("Remote tool approvals are disabled") == true ||
+                error.message?.contains("requires Zed-Desktop Mobile Gateway API v2") == true
+
+    private fun deriveTurnPhase(
+        status: String,
+        approvals: List<ToolApproval>,
+        elicitations: List<Elicitation> = emptyList(),
+    ): TurnPhase {
+        if (approvals.isNotEmpty() || elicitations.isNotEmpty()) return TurnPhase.AWAITING_APPROVAL
+        return when (status.trim().lowercase().replace('-', '_').replace(' ', '_')) {
+            "sending", "running", "active", "pending", "queued", "in_progress", "processing" -> TurnPhase.RUNNING
+            "awaiting_approval", "waiting_for_approval", "waiting" -> TurnPhase.AWAITING_APPROVAL
+            "cancelling", "canceling" -> TurnPhase.CANCELLING
+            "completed", "complete", "done", "cancelled", "canceled" -> TurnPhase.COMPLETED
+            "failed", "error" -> TurnPhase.FAILED
+            else -> TurnPhase.IDLE
+        }
+    }
+
+    private fun shouldPreserveLocalTurn(
+        current: ChatTurnState,
+        pendingMessage: PendingMessage?,
+        pendingWasObserved: Boolean,
+        derived: TurnPhase,
+    ): Boolean {
+        if (current.phase == TurnPhase.CANCELLING && derived in setOf(
+                TurnPhase.RUNNING,
+                TurnPhase.AWAITING_APPROVAL,
+                TurnPhase.CANCELLING,
+            )
+        ) {
+            return true
+        }
+        if (pendingWasObserved) return false
+        if (pendingMessage?.status == PendingMessageStatus.FAILED && current.phase == TurnPhase.FAILED) {
+            return derived != TurnPhase.FAILED
+        }
+        return pendingMessage != null &&
+                current.phase in setOf(TurnPhase.SENDING, TurnPhase.RUNNING, TurnPhase.CANCELLING) &&
+                derived in setOf(TurnPhase.IDLE, TurnPhase.COMPLETED)
+    }
+
+    private fun Message.isUserMessage(expectedText: String): Boolean =
+        role.trim().equals("user", ignoreCase = true) && text == expectedText
 
     /** Loads only a catalog whose persisted origin and device ID still match this credential. */
     private suspend fun loadCachedProjects(credential: DeviceCredential): List<Project> = try {
@@ -482,6 +1376,7 @@ class ZedViewModel(
     }
 
     private suspend fun handleRevokedCredential() {
+        invalidateChatSessionFromCurrentJob()
         clearPersistentPairingData()
         mutable.value = MobileState(notice = "This desktop removed the pairing. Scan a new QR code to reconnect.")
     }

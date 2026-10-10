@@ -32,9 +32,9 @@ class GatewayEventClientTest {
                 .setHeader("Content-Type", "text/event-stream")
                 .setBody(
                     "event: thread_completed\n" +
-                            "data: {\"project_id\":\"project-1\",\"thread_id\":\"thread-2\",\"turn_id\":\"turn-3\"}\n\n" +
+                            "data: {\"project_id\":\"project-1\",\"project_name\":\"Zed Desktop\",\"thread_id\":\"thread-2\",\"thread_title\":\"Review notifications\",\"turn_id\":\"turn-3\"}\n\n" +
                             "event: thread_failed\n" +
-                            "data: {\"project_id\":\"project-4\",\"thread_id\":\"thread-5\",\"turn_id\":\"turn-6\"}\n\n",
+                            "data: {\"project_id\":\"project-4\",\"project_name\":\"Mobile\",\"thread_id\":\"thread-5\",\"thread_title\":\"Run tests\",\"turn_id\":\"turn-6\"}\n\n",
                 ),
         )
         val received = mutableListOf<AgentCompletionEvent>()
@@ -46,13 +46,17 @@ class GatewayEventClientTest {
                 AgentCompletionEvent(
                     type = AgentCompletionEventType.COMPLETED,
                     projectId = "project-1",
+                    projectName = "Zed Desktop",
                     threadId = "thread-2",
+                    threadTitle = "Review notifications",
                     turnId = "turn-3",
                 ),
                 AgentCompletionEvent(
                     type = AgentCompletionEventType.FAILED,
                     projectId = "project-4",
+                    projectName = "Mobile",
                     threadId = "thread-5",
+                    threadTitle = "Run tests",
                     turnId = "turn-6",
                 ),
             ),
@@ -74,11 +78,11 @@ class GatewayEventClientTest {
                 .setHeader("Content-Type", "text/event-stream")
                 .setBody(
                     "event: unrelated\n" +
-                            "data: {\"project_id\":\"project-1\",\"thread_id\":\"thread-2\",\"turn_id\":\"turn-3\"}\n\n" +
+                            "data: {\"project_id\":\"project-1\",\"project_name\":\"Zed\",\"thread_id\":\"thread-2\",\"thread_title\":\"Thread\",\"turn_id\":\"turn-3\"}\n\n" +
                             "event: thread_failed\n" +
-                            "data: {\"project_id\":false,\"thread_id\":\"thread-2\",\"turn_id\":\"turn-3\"}\n\n" +
+                            "data: {\"project_id\":false,\"project_name\":\"Zed\",\"thread_id\":\"thread-2\",\"thread_title\":\"Thread\",\"turn_id\":\"turn-3\"}\n\n" +
                             "event: thread_completed\n" +
-                            "data: {\"project_id\":\"project-1\",\"thread_id\":\"thread-2\",\"turn_id\":\"turn-3\",\"unexpected\":true}\n\n",
+                            "data: {\"project_id\":\"project-1\",\"project_name\":\"Zed\",\"thread_id\":\"thread-2\",\"thread_title\":\"Thread\",\"turn_id\":\"turn-3\",\"unexpected\":true}\n\n",
                 ),
         )
         val received = mutableListOf<AgentCompletionEvent>()

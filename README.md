@@ -1,6 +1,6 @@
 # Zed Mobile (Android)
 
-Zed Mobile is a focused Android companion for the local `Zed-Desktop` fork. On a private Tailscale network it lets you choose an open or recently used local project, continue a native Zed Agent thread, send prompts, see retained agent activity, make one-time tool decisions, adjust a thread's model/thinking configuration, review recorded diffs, and receive direct live task-completion notifications.
+Zed Mobile is a focused Android companion for the local `Zed-Desktop` fork. On a private Tailscale network it lets you choose an open or recently used local project, continue a native Zed Agent thread, send prompts, see retained agent activity, answer tool approvals with any option desktop offers, answer the Agent's questions, adjust a thread's model/thinking configuration, review diffs and keep or reject the Agent's edits, and receive direct live task-completion notifications.
 
 It intentionally does **not** expose a general filesystem, terminal, shell, or remote desktop interface.
 
@@ -25,7 +25,7 @@ The latest authenticated v2 project catalog is cached locally only to make launc
 3. Put the desktop and Android device on the same Tailscale tailnet.
 4. In **Settings → Mobile Gateway**, configure:
    - **Bind Address** as the desktop's Tailscale IP and port, for example `100.99.221.90:7331`;
-   - **Enabled**. Every currently open local project becomes available to paired phones, recently used local projects can be reopened through the catalog, and phone-based one-time Agent approvals are always enabled.
+   - **Enabled**. Every currently open local project becomes available to paired phones, recently used local projects can be reopened through the catalog, and phones can answer approvals and questions and keep or reject Agent edits.
 5. Choose **Connect mobile device**, open Zed Mobile, and scan the QR code.
 
 The gateway must never be made public through a proxy, port forwarding, or reverse tunnel. The desktop-maintained project catalog is an API-access boundary—not a sandbox for Agent tools—so review tool permissions, model data sharing, and potential provider costs.
@@ -36,9 +36,9 @@ The gateway must never be made public through a proxy, port forwarding, or rever
 Scan desktop QR → Projects → Threads → Agent chat → Changes
 ```
 
-The warm Material 3 UI is optimized for phone-sized screens. The chat renders user/assistant messages, collapsible thinking blocks, tool output, plans, compaction information, pending approval cards, and a model/thinking configuration sheet. Diff review is read-only.
+The warm Material 3 UI is optimized for phone-sized screens. The chat renders user/assistant messages, collapsible thinking blocks, tool output, plans, compaction information, approval cards with every desktop option (including always-rules scoped to command patterns), Agent question forms, and a model/thinking configuration sheet. Older messages load on demand. The Changes page can Keep or Reject edits per file or all at once, undo the last reject, and page through large diffs.
 
-A phone decision always uses the desktop's current server-side one-time Allow/Deny option. It cannot create permanent permissions, alter command input, or approve a stale tool call. The QR ticket expires after two minutes, but the successfully paired device credential persists until you remove the device in Zed-Desktop settings or forget the pairing on the phone.
+A phone decision always names one of the desktop's own options for the call that is pending now; it cannot invent a rule, alter command input, or approve a stale tool call. The QR ticket expires after two minutes, but the successfully paired device credential persists until you remove the device in Zed-Desktop settings or forget the pairing on the phone.
 
 ## Build and test
 
@@ -47,6 +47,14 @@ Open `zed-mobile` in Android Studio with Android SDK Platform 35 installed, or r
 ```sh
 ./gradlew test assembleDebug
 ```
+
+### Screenshots without an emulator
+
+```sh
+./gradlew recordRoborazziDebug --tests 'dev.zed.mobile.ScreenshotTest'
+```
+
+This renders real app screens from fixed sample states on the JVM (Robolectric + Roborazzi) to `app/build/outputs/roborazzi/`. No emulator, device, or desktop is needed.
 
 The debug APK is created at:
 

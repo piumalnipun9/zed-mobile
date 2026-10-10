@@ -134,6 +134,79 @@ class HttpZedRepositoryTest {
         }
     }
 
+    @Test
+    fun `v2 tool details use an opaque scoped route and parse both outcomes`() {
+        runBlocking {
+            val v2Repo = HttpZedRepository.v2(
+                host = "http://127.0.0.1:${server.port}",
+                credential = "fixture-token",
+                debug = false,
+            )
+            respond(
+                """{"tool_call_id":"call /?%#","status":"completed","available":true,"format":"markdown","output":"line one\nline two","truncated":true}""",
+            )
+
+            val available = v2Repo.toolDetails("thread /?%#", "call /?%#")
+
+            assertEquals("call /?%#", available.toolCallId)
+            assertEquals("completed", available.status)
+            assertTrue(available.available)
+            assertEquals("markdown", available.format)
+            assertEquals("line one\nline two", available.output)
+            assertTrue(available.truncated)
+            request(
+                "GET",
+                "/v2/threads/thread%20%2F%3F%25%23/tool-calls/call%20%2F%3F%25%23/output",
+            )
+
+            respond("""{"tool_call_id":"call /?%#","status":"completed","available":false}""")
+            val unavailable = v2Repo.toolDetails("thread /?%#", "call /?%#")
+
+            assertFalse(unavailable.available)
+            assertNull(unavailable.format)
+            assertNull(unavailable.output)
+            assertFalse(unavailable.truncated)
+            request(
+                "GET",
+                "/v2/threads/thread%20%2F%3F%25%23/tool-calls/call%20%2F%3F%25%23/output",
+            )
+        }
+    }
+
+    @Test
+    fun `tool details reject malformed payloads invalid ids and v1 access before a request`() {
+        runBlocking {
+            val v2Repo = HttpZedRepository.v2(
+                host = "http://127.0.0.1:${server.port}",
+                credential = "fixture-token",
+                debug = false,
+            )
+            respond("""{"tool_call_id":"call","status":"completed","available":true,"format":"markdown","truncated":false}""")
+            assertTrue(expectFailure { v2Repo.toolDetails("thread", "call") }.contains("output"))
+
+            respond("""{"error":"removed"}""", 401)
+            try {
+                v2Repo.toolDetails("thread", "call")
+                fail("Expected device authentication failure")
+            } catch (_: GatewayAuthenticationException) {
+            }
+
+            val requestsBeforeLocalValidation = server.requestCount
+            assertTrue(expectFailure { repo.toolDetails("thread", "call") }.contains("API v2"))
+            try {
+                v2Repo.toolDetails("..", "call")
+                fail("Expected invalid thread ID")
+            } catch (_: IllegalArgumentException) {
+            }
+            try {
+                v2Repo.toolDetails("thread", "..")
+                fail("Expected invalid tool ID")
+            } catch (_: IllegalArgumentException) {
+            }
+            assertEquals(requestsBeforeLocalValidation, server.requestCount)
+        }
+    }
+
     private suspend fun expectFailure(block: suspend () -> Unit): String {
         try {
             block(); fail("Expected GatewayException")
