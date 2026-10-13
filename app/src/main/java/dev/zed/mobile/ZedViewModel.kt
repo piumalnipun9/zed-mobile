@@ -121,6 +121,9 @@ data class MobileState(
     val projects: List<Project> = emptyList(),
     val project: Project? = null,
     val threads: List<ThreadSummary> = emptyList(),
+    /** Agents configured on desktop for [project]; empty for desktops without external agents. */
+    val agents: List<AgentInfo> = emptyList(),
+    val agentPickerVisible: Boolean = false,
     val selectedThread: ThreadSummary? = null,
     val snapshot: ThreadSnapshot? = null,
     val files: List<ChangedFile> = emptyList(),
@@ -318,10 +321,12 @@ class ZedViewModel(
             val opened = if (project.isOpen) project else openAndAwaitProject(repo, project)
             // Keep the catalog visible until both the desktop open and thread request have succeeded.
             val threads = repo.threads(opened.id)
+            val agents = loadAgents(repo, opened.id)
             mutable.value = mutable.value.copy(
                 page = Page.THREADS,
                 project = opened,
                 threads = threads,
+                agents = agents,
                 selectedThread = null,
                 snapshot = null,
                 turn = ChatTurnState(),
@@ -331,6 +336,15 @@ class ZedViewModel(
                 notice = if (project.isOpen) null else "Opened on Desktop. Your Agent threads are ready.",
             )
         }
+    }
+
+    /** Older desktops have no agent list; they can still create built-in Zed Agent threads. */
+    private suspend fun loadAgents(repo: ZedRepository, projectId: String): List<AgentInfo> = try {
+        repo.agents(projectId)
+    } catch (error: GatewayAuthenticationException) {
+        throw error
+    } catch (error: GatewayException) {
+        emptyList()
     }
 
     /** Performs one catalog-open POST, then only polls authenticated catalog reads for that ID. */
@@ -383,10 +397,27 @@ class ZedViewModel(
         // The visible chat owns the first fetch and subsequent lifecycle-aware polling.
     }
 
-    fun createThread() {
+    /** Asks which agent to use only when desktop has external agents configured. */
+    fun requestNewThread() {
+        val current = mutable.value
+        if (current.busy || current.project == null) return
+        if (current.agents.any { !it.isNative }) {
+            mutable.value = current.copy(agentPickerVisible = true)
+        } else {
+            createThread()
+        }
+    }
+
+    fun dismissAgentPicker() {
+        mutable.value = mutable.value.copy(agentPickerVisible = false)
+    }
+
+    /** Null [agentId] means the built-in Zed Agent. */
+    fun createThread(agentId: String? = null) {
         val project = mutable.value.project ?: return
+        mutable.value = mutable.value.copy(agentPickerVisible = false)
         task {
-            val thread = requireNotNull(repository).createThread(project.id)
+            val thread = requireNotNull(repository).createThread(project.id, agentId)
             beginChatSession()
             mutable.value = mutable.value.copy(
                 page = Page.CHAT,
@@ -638,8 +669,12 @@ class ZedViewModel(
                         mutable.value = mutable.value.copy(projects = projects, gatewayUnavailable = false)
                     }
 
-                    Page.THREADS -> mutable.value =
-                        mutable.value.copy(threads = repo.threads(requireNotNull(current.project).id))
+                    Page.THREADS -> {
+                        val projectId = requireNotNull(current.project).id
+                        val threads = repo.threads(projectId)
+                        val agents = loadAgents(repo, projectId)
+                        mutable.value = mutable.value.copy(threads = threads, agents = agents)
+                    }
 
                     Page.CHANGES -> {
                         val changes = repo.changesSnapshot(requireNotNull(current.selectedThread).id)
@@ -687,14 +722,17 @@ class ZedViewModel(
         val observedConfigurationRevision = configurationRevision
         try {
             val snapshot = repo.thread(id)
-            val approvals = try {
+            // A thread whose agent has not started (still initializing, or waiting for a desktop
+            // sign-in) has no approvals, questions, or configuration, and desktop refuses those reads.
+            val threadReady = snapshot.status != THREAD_STATUS_NEEDS_AUTHENTICATION && snapshot.status != "initializing"
+            val approvals = if (!threadReady) emptyList() else try {
                 repo.approvals(id)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: GatewayException) {
                 if (approvalsUnavailable(error)) emptyList() else throw error
             }
-            val elicitations = try {
+            val elicitations = if (!threadReady) emptyList() else try {
                 repo.elicitations(id)
             } catch (error: CancellationException) {
                 throw error
@@ -704,7 +742,7 @@ class ZedViewModel(
                 // Desktops from before phone questions existed simply have none to answer here.
                 emptyList()
             }
-            val configuration = try {
+            val configuration = if (!threadReady) null else try {
                 repo.configuration(id)
             } catch (error: CancellationException) {
                 throw error
@@ -1016,7 +1054,25 @@ class ZedViewModel(
         thinkingEnabled: Boolean? = null,
         thinkingEffort: String? = null,
         clearThinkingEffort: Boolean = false,
-    ) {
+    ) = saveConfiguration { repo, threadId ->
+        repo.updateConfiguration(
+            id = threadId,
+            model = model,
+            thinkingEnabled = thinkingEnabled,
+            thinkingEffort = thinkingEffort,
+            clearThinkingEffort = clearThinkingEffort,
+        )
+    }
+
+    fun setAgentMode(modeId: String) = saveConfiguration { repo, threadId ->
+        repo.setAgentMode(threadId, modeId)
+    }
+
+    fun setAgentOption(optionId: String, value: AgentOptionValue) = saveConfiguration { repo, threadId ->
+        repo.setAgentOption(threadId, optionId, value)
+    }
+
+    private fun saveConfiguration(save: suspend (ZedRepository, String) -> ThreadConfiguration) {
         val current = mutable.value
         val threadId = current.selectedThread?.id ?: return
         if (current.turn.isActive || current.configurationState.isSavingConfiguration) return
@@ -1032,13 +1088,7 @@ class ZedViewModel(
         )
         configurationJob = viewModelScope.launch {
             try {
-                val configuration = repo.updateConfiguration(
-                    id = threadId,
-                    model = model,
-                    thinkingEnabled = thinkingEnabled,
-                    thinkingEffort = thinkingEffort,
-                    clearThinkingEffort = clearThinkingEffort,
-                )
+                val configuration = save(repo, threadId)
                 updateCurrentChat(threadId, session) { latest ->
                     if (configurationRevision != revision) {
                         latest

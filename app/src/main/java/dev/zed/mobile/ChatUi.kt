@@ -138,7 +138,7 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
     var showActions by rememberSaveable(threadId) { mutableStateOf(false) }
     var showContextInfo by rememberSaveable(threadId) { mutableStateOf(false) }
     val openConfiguration = {
-        vm.loadModels()
+        if (!usesExternalAgent(state)) vm.loadModels()
         showConfiguration = true
     }
 
@@ -150,6 +150,13 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
 
     Column(modifier = Modifier.fillMaxSize()) {
         state.pollError?.let { InlineNotice("Can't refresh this thread · $it", error = true) }
+        when (state.snapshot?.status) {
+            THREAD_STATUS_NEEDS_AUTHENTICATION -> InlineNotice(
+                "${agentName(state)} needs a one-time sign-in. Open this thread in Zed Desktop, sign in there, then come back.",
+                error = true,
+            )
+            "error" -> state.snapshot?.errorMessage?.let { InlineNotice(it, error = true) }
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f),
@@ -186,7 +193,7 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
             } else if (messages.isEmpty() && state.approvals.isEmpty() && state.pendingMessage == null) {
                 item {
                     EmptyState(
-                        title = if (state.snapshot == null) "Connecting…" else "What should Zed work on?",
+                        title = if (state.snapshot == null) "Connecting…" else "What should ${agentName(state)} work on?",
                         detail = if (state.snapshot == null) {
                             "Messages appear here when desktop Zed responds."
                         } else {
@@ -251,6 +258,7 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
     if (showActions) {
         ComposerActionsSheet(
             changesLabel = changesLabel(state),
+            configureLabel = if (usesExternalAgent(state)) "Agent settings" else "Model and thinking",
             onDismiss = { showActions = false },
             onConfigure = {
                 showActions = false
@@ -996,7 +1004,7 @@ private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Un
     val turnActive = state.turn.isActive
     val canSend = !state.busy && !turnActive && state.draft.isNotBlank()
     val canStop = !state.busy && turnActive && state.turn.canCancel
-    val modelLabel = state.configuration?.model?.modelName ?: "Model"
+    val modelLabel = configurationLabel(state)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1013,7 +1021,10 @@ private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Un
             Box(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp)) {
                 if (state.draft.isEmpty()) {
                     Text(
-                        if (turnActive) "Zed is working…" else "Message Zed",
+                        when {
+                            turnActive -> "${agentName(state)} is working…"
+                            else -> "Message ${agentName(state)}"
+                        },
                         style = MaterialTheme.typography.bodyLarge,
                         color = ZedColors.Faint,
                     )
@@ -1030,7 +1041,7 @@ private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Un
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 24.dp)
-                        .semantics { contentDescription = "Message the Zed Agent" },
+                        .semantics { contentDescription = if (usesExternalAgent(state)) "Message ${agentName(state)}" else "Message the Zed Agent" },
                 )
             }
             Row(
@@ -1047,7 +1058,7 @@ private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Un
                         .clip(MaterialTheme.shapes.small)
                         .clickable(enabled = !state.busy, onClick = onConfigure)
                         .padding(horizontal = 8.dp, vertical = 6.dp)
-                        .semantics { contentDescription = "Model and thinking" },
+                        .semantics { contentDescription = if (usesExternalAgent(state)) "Agent settings" else "Model and thinking" },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
@@ -1097,7 +1108,7 @@ private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Un
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun QuietSheet(onDismiss: () -> Unit, title: String, content: @Composable () -> Unit) {
+internal fun QuietSheet(onDismiss: () -> Unit, title: String, content: @Composable () -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -1118,8 +1129,29 @@ private fun QuietSheet(onDismiss: () -> Unit, title: String, content: @Composabl
     }
 }
 
+internal fun usesExternalAgent(state: MobileState): Boolean =
+    state.configuration?.isExternalAgent == true || state.selectedThread?.agent?.isNative == false
+
+internal fun agentName(state: MobileState): String = when {
+    usesExternalAgent(state) -> state.configuration?.agent?.name ?: state.selectedThread?.agent?.name ?: "Agent"
+    else -> "Zed"
+}
+
+internal fun configurationLabel(state: MobileState): String {
+    val configuration = state.configuration
+    if (!usesExternalAgent(state)) return configuration?.model?.modelName ?: "Model"
+    val model = configuration?.options
+        ?.firstOrNull { it.category == "model" && it.type == AGENT_OPTION_SELECT }
+        ?.let { option -> option.values.firstOrNull { it.value == option.currentValue }?.name }
+    return model ?: agentName(state)
+}
+
 @Composable
 private fun ThreadConfigurationSheet(state: MobileState, vm: ZedViewModel, onDismiss: () -> Unit) {
+    if (usesExternalAgent(state)) {
+        ExternalAgentConfigurationSheet(state, vm, onDismiss)
+        return
+    }
     val configuration = state.configuration
     val selectedModel = configuration?.model
     val canChange = !state.isSavingConfiguration && !state.turn.isActive
@@ -1208,15 +1240,103 @@ private fun ThreadConfigurationSheet(state: MobileState, vm: ZedViewModel, onDis
 }
 
 @Composable
+private fun ExternalAgentConfigurationSheet(state: MobileState, vm: ZedViewModel, onDismiss: () -> Unit) {
+    val configuration = state.configuration
+    val canChange = !state.isSavingConfiguration && !state.turn.isActive
+    val modes = configuration?.modes?.takeIf { it.available.isNotEmpty() }
+    QuietSheet(onDismiss, agentName(state)) {
+        if (state.isSavingConfiguration) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .height(1.dp),
+                color = ZedColors.Text,
+                trackColor = ZedColors.Hairline,
+            )
+        }
+        state.configurationState.error?.let { InlineNotice(it, error = true) }
+        if (state.turn.isActive) InlineNotice("You can change these settings after this turn finishes.")
+        when {
+            configuration == null -> InlineNotice("Loading settings from desktop…")
+            modes == null && configuration.options.isEmpty() ->
+                InlineNotice("${agentName(state)} has no settings that can be changed from the phone.")
+        }
+        modes?.let {
+            SectionLabel("Mode")
+            it.available.forEach { mode ->
+                AgentChoiceRow(
+                    title = mode.name,
+                    subtitle = mode.description,
+                    selected = mode.id == it.current,
+                    enabled = canChange,
+                    onClick = { vm.setAgentMode(mode.id) },
+                )
+            }
+        }
+        configuration?.options.orEmpty().forEach { option ->
+            when (option.type) {
+                AGENT_OPTION_SELECT -> {
+                    SectionLabel(option.name)
+                    option.values.forEach { value ->
+                        AgentChoiceRow(
+                            title = value.name,
+                            subtitle = value.description ?: value.group,
+                            selected = value.value == option.currentValue,
+                            enabled = canChange,
+                            onClick = { vm.setAgentOption(option.id, AgentOptionValue.Choice(value.value)) },
+                        )
+                    }
+                }
+                AGENT_OPTION_BOOLEAN -> Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(option.name, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    Switch(
+                        checked = option.currentBoolean == true,
+                        onCheckedChange = { vm.setAgentOption(option.id, AgentOptionValue.Toggle(it)) },
+                        enabled = canChange,
+                        colors = quietSwitchColors(),
+                        modifier = Modifier
+                            .scale(0.8f)
+                            .semantics { contentDescription = option.name },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AgentChoiceRow(title: String, subtitle: String?, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    ListRow(
+        title = title,
+        subtitle = subtitle,
+        // Re-selecting the current value would only round-trip to the agent.
+        enabled = enabled && !selected,
+        onClick = onClick,
+        showChevron = false,
+        modifier = Modifier.semantics { contentDescription = "Select $title" },
+        trailing = {
+            if (selected) Icon(Symbols.Check, contentDescription = "Selected", tint = ZedColors.Text, modifier = Modifier.size(18.dp))
+        },
+    )
+}
+
+@Composable
 private fun ComposerActionsSheet(
     changesLabel: String,
+    configureLabel: String,
     onDismiss: () -> Unit,
     onConfigure: () -> Unit,
     onShowChanges: () -> Unit,
     onAddContext: () -> Unit,
 ) {
     QuietSheet(onDismiss, "Thread") {
-        SheetAction(Symbols.Tune, "Model and thinking", onConfigure)
+        SheetAction(Symbols.Tune, configureLabel, onConfigure)
         SheetAction(Symbols.Description, changesLabel, onShowChanges)
         SheetAction(Symbols.AttachFile, "Add context", onAddContext)
     }

@@ -14,6 +14,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.ConnectionPool
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -78,6 +79,7 @@ class HttpZedRepository private constructor(
             messages = obj.objects("messages").map { Message(it.string("role"), it.string("text")) },
             transcript = obj.optionalObjects("transcript").map { it.transcriptEntry() },
             transcriptOmittedEntries = obj.optionalNumber("transcript_omitted_entries") ?: 0,
+            errorMessage = obj.optionalString("error_message"),
         )
     }
 
@@ -94,11 +96,44 @@ class HttpZedRepository private constructor(
         )
     }
 
-    override suspend fun createThread(projectId: String) = request(
-        "POST",
-        listOf("threads"),
-        JsonObject().apply { addProperty("project_id", projectId) },
-    ).summary()
+    override suspend fun createThread(projectId: String) = createThread(projectId, null)
+
+    override suspend fun createThread(projectId: String, agentId: String?): ThreadSummary {
+        if (agentId != null) requireV2("External agents")
+        return request(
+            "POST",
+            listOf("threads"),
+            JsonObject().apply {
+                addProperty("project_id", projectId)
+                agentId?.let { addProperty("agent_id", it) }
+            },
+        ).summary()
+    }
+
+    override suspend fun agents(projectId: String): List<AgentInfo> {
+        requireV2("External agents")
+        return request("GET", listOf("projects", projectId, "agents")).objects("agents").map { it.agentInfo() }
+    }
+
+    override suspend fun setAgentMode(id: String, modeId: String): ThreadConfiguration {
+        requireV2("External agents")
+        val body = JsonObject().apply { addProperty("mode_id", modeId) }
+        return request("PUT", listOf("threads", id, "configuration"), body).threadConfiguration()
+    }
+
+    override suspend fun setAgentOption(id: String, optionId: String, value: AgentOptionValue): ThreadConfiguration {
+        requireV2("External agents")
+        val body = JsonObject().apply {
+            add("config_option", JsonObject().apply {
+                addProperty("id", optionId)
+                when (value) {
+                    is AgentOptionValue.Choice -> addProperty("value", value.value)
+                    is AgentOptionValue.Toggle -> addProperty("value", value.value)
+                }
+            })
+        }
+        return request("PUT", listOf("threads", id, "configuration"), body).threadConfiguration()
+    }
 
     override suspend fun send(id: String, text: String) {
         accepted(
@@ -431,6 +466,10 @@ private fun newZedHttpClient(): OkHttpClient = OkHttpClient.Builder()
     .followRedirects(false)
     .followSslRedirects(false)
     .retryOnConnectionFailure(false)
+    // The gateway closes idle connections after 15 seconds. Retries are disabled so actions are
+    // never replayed, so evict pooled connections before the gateway does instead of reusing a
+    // closed one.
+    .connectionPool(ConnectionPool(5, 10, TimeUnit.SECONDS))
     .connectTimeout(10, TimeUnit.SECONDS)
     .readTimeout(20, TimeUnit.SECONDS)
     .callTimeout(30, TimeUnit.SECONDS)
@@ -585,7 +624,58 @@ private fun JsonObject.optionalValue(key: String): String? {
     return if (value.isJsonNull) null else value.toString()
 }
 
-private fun JsonObject.summary() = ThreadSummary(string("id"), string("title"), string("status"))
+private fun JsonObject.summary() = ThreadSummary(
+    id = string("id"),
+    title = string("title"),
+    status = string("status"),
+    agent = optionalObject("agent")?.agentInfo(),
+    errorMessage = optionalString("error_message"),
+)
+
+private fun JsonObject.optionalObject(key: String): JsonObject? {
+    val value = get(key) ?: return null
+    if (value.isJsonNull) return null
+    if (!value.isJsonObject) throw GatewayException("Invalid desktop response field: $key")
+    return value.asJsonObject
+}
+
+private fun JsonObject.agentInfo() = AgentInfo(
+    id = string("id"),
+    name = string("name"),
+    isNative = bool("is_native"),
+)
+
+private fun JsonObject.agentConfigOption(): AgentConfigOption? {
+    val type = string("type")
+    return when (type) {
+        AGENT_OPTION_SELECT -> AgentConfigOption(
+            id = string("id"),
+            name = string("name"),
+            description = optionalString("description"),
+            category = optionalString("category"),
+            type = type,
+            currentValue = string("current_value"),
+            values = objects("values").map {
+                AgentConfigValue(
+                    value = it.string("value"),
+                    name = it.string("name"),
+                    description = it.optionalString("description"),
+                    group = it.optionalString("group"),
+                )
+            },
+        )
+        AGENT_OPTION_BOOLEAN -> AgentConfigOption(
+            id = string("id"),
+            name = string("name"),
+            description = optionalString("description"),
+            category = optionalString("category"),
+            type = type,
+            currentBoolean = bool("current_value"),
+        )
+        // A newer desktop may report option kinds this app cannot edit; hide rather than guess.
+        else -> null
+    }
+}
 
 private fun JsonObject.project(): Project {
     val kind = optionalString("kind") ?: PROJECT_KIND_LOCAL
@@ -750,9 +840,21 @@ private fun JsonObject.threadConfiguration(): ThreadConfiguration {
         model.isJsonObject -> model.asJsonObject.modelCapability()
         else -> throw GatewayException("Invalid desktop thread model.")
     }
+    val modes = optionalObject("modes")?.let { modes ->
+        AgentModes(
+            current = modes.string("current"),
+            available = modes.objects("available").map {
+                AgentMode(it.string("id"), it.string("name"), it.optionalString("description"))
+            },
+        )
+    }
     return ThreadConfiguration(
         model = selectedModel,
-        thinkingEnabled = bool("thinking_enabled"),
+        // External agents report no native thinking fields.
+        thinkingEnabled = optionalBoolean("thinking_enabled") ?: false,
         thinkingEffort = optionalString("thinking_effort"),
+        agent = optionalObject("agent")?.agentInfo(),
+        modes = modes,
+        options = optionalObjects("options").mapNotNull { it.agentConfigOption() },
     )
 }

@@ -207,6 +207,63 @@ class HttpZedRepositoryTest {
         }
     }
 
+    @Test
+    fun `v2 external agents are listed, created, and configured by desktop-issued ids`() {
+        runBlocking {
+            val v2Repo = HttpZedRepository.v2(
+                host = "http://127.0.0.1:${server.port}",
+                credential = "fixture-token",
+                debug = false,
+            )
+            respond("""{"agents":[{"id":"Zed Agent","name":"Zed Agent","is_native":true},{"id":"claude-acp","name":"Claude Agent","is_native":false}]}""")
+            val agents = v2Repo.agents("project")
+            assertEquals(listOf(true, false), agents.map { it.isNative })
+            request("GET", "/v2/projects/project/agents")
+
+            respond("""{"id":"t1","title":"New thread","status":"needs_authentication","agent":{"id":"claude-acp","name":"Claude Agent","is_native":false}}""")
+            val created = v2Repo.createThread("project", "claude-acp")
+            assertEquals(THREAD_STATUS_NEEDS_AUTHENTICATION, created.status)
+            assertEquals("Claude Agent", created.agent?.name)
+            request("POST", "/v2/threads", """{"project_id":"project","agent_id":"claude-acp"}""")
+
+            val configuration = """{"agent":{"id":"claude-acp","name":"Claude Agent","is_native":false},"modes":null,"options":[
+                {"id":"model","name":"Model","description":null,"category":"model","type":"select","current_value":"sonnet",
+                 "values":[{"value":"sonnet","name":"Sonnet","description":null,"group":null},{"value":"opus","name":"Opus","description":"Most capable","group":"Claude"}]},
+                {"id":"fast","name":"Fast mode","description":null,"category":null,"type":"boolean","current_value":false},
+                {"id":"future","name":"Future","type":"slider","current_value":3}]}"""
+            respond(configuration)
+            val parsed = v2Repo.configuration("t1")
+            assertTrue(parsed.isExternalAgent)
+            assertFalse(parsed.thinkingEnabled)
+            assertEquals(listOf("model", "fast"), parsed.options.map { it.id })
+            assertEquals("Claude", parsed.options.first().values.last().group)
+            assertEquals(false, parsed.options.last().currentBoolean)
+            request("GET", "/v2/threads/t1/configuration")
+
+            respond(configuration)
+            v2Repo.setAgentOption("t1", "model", AgentOptionValue.Choice("opus"))
+            request("PUT", "/v2/threads/t1/configuration", """{"config_option":{"id":"model","value":"opus"}}""")
+            respond(configuration)
+            v2Repo.setAgentOption("t1", "fast", AgentOptionValue.Toggle(true))
+            request("PUT", "/v2/threads/t1/configuration", """{"config_option":{"id":"fast","value":true}}""")
+
+            respond("""{"agent":{"id":"gemini","name":"Gemini CLI","is_native":false},"modes":{"current":"default","available":[{"id":"default","name":"Default","description":null},{"id":"yolo","name":"YOLO","description":"Auto-approve"}]},"options":[]}""")
+            val modes = requireNotNull(v2Repo.setAgentMode("t2", "yolo").modes)
+            assertEquals("default", modes.current)
+            assertEquals("Auto-approve", modes.available.last().description)
+            request("PUT", "/v2/threads/t2/configuration", """{"mode_id":"yolo"}""")
+        }
+    }
+
+    @Test
+    fun `external agents require v2 before any request`() {
+        runBlocking {
+            assertTrue(expectFailure { repo.agents("project") }.contains("v2"))
+            assertTrue(expectFailure { repo.createThread("project", "claude-acp") }.contains("v2"))
+            assertEquals(0, server.requestCount)
+        }
+    }
+
     private suspend fun expectFailure(block: suspend () -> Unit): String {
         try {
             block(); fail("Expected GatewayException")

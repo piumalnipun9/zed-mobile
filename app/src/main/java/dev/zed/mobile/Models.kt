@@ -30,7 +30,19 @@ val PROJECT_KINDS = setOf(
     PROJECT_KIND_PODMAN,
 )
 
-data class ThreadSummary(val id: String, val title: String, val status: String)
+/** A desktop-configured agent. The phone can only pick from this list; it never names a command. */
+data class AgentInfo(val id: String, val name: String, val isNative: Boolean)
+
+data class ThreadSummary(
+    val id: String,
+    val title: String,
+    val status: String,
+    /** Null when an older desktop did not report the agent; such threads are always native. */
+    val agent: AgentInfo? = null,
+    val errorMessage: String? = null,
+)
+
+const val THREAD_STATUS_NEEDS_AUTHENTICATION = "needs_authentication"
 data class Message(val role: String, val text: String)
 
 
@@ -76,6 +88,7 @@ data class ThreadSnapshot(
     val transcript: List<TranscriptEntry> = emptyList(),
     /** How many older transcript entries exist before the first one in [transcript]. */
     val transcriptOmittedEntries: Int = 0,
+    val errorMessage: String? = null,
 )
 
 /** One page of older transcript entries, oldest first. */
@@ -186,7 +199,45 @@ data class ThreadConfiguration(
     val model: ModelCapability?,
     val thinkingEnabled: Boolean,
     val thinkingEffort: String?,
+    val agent: AgentInfo? = null,
+    /** External agents only, and only when the agent reports no [options]. */
+    val modes: AgentModes? = null,
+    /** External agents only: the agent's own settings, such as its model or permission mode. */
+    val options: List<AgentConfigOption> = emptyList(),
+) {
+    val isExternalAgent: Boolean get() = agent?.isNative == false
+}
+
+data class AgentMode(val id: String, val name: String, val description: String? = null)
+
+data class AgentModes(val current: String, val available: List<AgentMode>)
+
+data class AgentConfigValue(
+    val value: String,
+    val name: String,
+    val description: String? = null,
+    val group: String? = null,
 )
+
+data class AgentConfigOption(
+    val id: String,
+    val name: String,
+    val description: String?,
+    /** ACP category such as `mode`, `model`, or `thought_level`; null when uncategorized. */
+    val category: String?,
+    val type: String,
+    val currentValue: String? = null,
+    val currentBoolean: Boolean? = null,
+    val values: List<AgentConfigValue> = emptyList(),
+)
+
+const val AGENT_OPTION_SELECT = "select"
+const val AGENT_OPTION_BOOLEAN = "boolean"
+
+sealed interface AgentOptionValue {
+    data class Choice(val value: String) : AgentOptionValue
+    data class Toggle(val value: Boolean) : AgentOptionValue
+}
 
 /** A validated, one-time QR pairing ticket. The secret must never be logged or displayed. */
 data class PairingTicket(
@@ -211,6 +262,12 @@ interface ZedRepository {
     suspend fun threads(projectId: String): List<ThreadSummary>
     suspend fun thread(id: String): ThreadSnapshot
     suspend fun createThread(projectId: String): ThreadSummary
+
+    /** Null [agentId] means the built-in Zed Agent. */
+    suspend fun createThread(projectId: String, agentId: String?): ThreadSummary =
+        if (agentId == null) createThread(projectId) else unsupported("External agents")
+
+    suspend fun agents(projectId: String): List<AgentInfo> = unsupported("External agents")
     suspend fun send(id: String, text: String)
     suspend fun cancel(id: String)
     suspend fun changes(id: String): List<ChangedFile>
@@ -233,6 +290,10 @@ interface ZedRepository {
         thinkingEffort: String? = null,
         clearThinkingEffort: Boolean = false,
     ): ThreadConfiguration = unsupported("Thread configuration")
+
+    suspend fun setAgentMode(id: String, modeId: String): ThreadConfiguration = unsupported("External agents")
+    suspend fun setAgentOption(id: String, optionId: String, value: AgentOptionValue): ThreadConfiguration =
+        unsupported("External agents")
 
     suspend fun approvals(id: String): List<ToolApproval> = unsupported("Tool approvals")
     suspend fun resolveApproval(id: String, toolCallId: String, allow: Boolean) = unsupported<Unit>("Tool approvals")

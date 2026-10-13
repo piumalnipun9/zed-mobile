@@ -63,6 +63,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.zeddesktop.mobile.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -82,6 +83,9 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: ZedViewModel = viewModel()
             val scanner = remember { AndroidQrCodeScanner(this@MainActivity) }
+            LaunchedEffect(Unit) {
+                consumeDebugPairingQr()?.let { vm.pairQr(it) }
+            }
             val scope = rememberCoroutineScope()
             var scanning by remember { mutableStateOf(false) }
             var scannerFeedback by remember { mutableStateOf<String?>(null) }
@@ -120,6 +124,18 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * Debug builds only: emulators without Play services cannot run the QR scanner, so a test can
+     * pass the same one-time `ZEDM2:` value with `adb shell am start --es`. It is validated exactly
+     * like a scanned code.
+     */
+    private fun consumeDebugPairingQr(): String? {
+        if (!BuildConfig.DEBUG) return null
+        val value = intent?.getStringExtra(DEBUG_PAIRING_QR_EXTRA) ?: return null
+        intent.removeExtra(DEBUG_PAIRING_QR_EXTRA)
+        return value
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -198,29 +214,30 @@ fun ZedApp(
         drawerState = drawerState,
         gesturesEnabled = state.page != Page.PAIR,
         drawerContent = {
-            if (state.page != Page.PAIR) {
-                MobileNavigationDrawer(
-                    state = state,
-                    onDestination = { page ->
-                        drawerScope.launch {
-                            drawerState.close()
-                            when (page) {
-                                Page.PROJECTS -> vm.showProjects()
-                                Page.THREADS -> vm.showThreads()
-                                Page.CHAT -> vm.showChat()
-                                Page.SETTINGS -> vm.showSettings()
-                                else -> Unit
-                            }
+            // Always compose the sheet: the drawer measures its closed offset from the sheet's
+            // width, so an empty sheet on the pairing page would leave it stuck open afterwards.
+            // Gestures are disabled and no menu button is shown while pairing.
+            MobileNavigationDrawer(
+                state = state,
+                onDestination = { page ->
+                    drawerScope.launch {
+                        drawerState.close()
+                        when (page) {
+                            Page.PROJECTS -> vm.showProjects()
+                            Page.THREADS -> vm.showThreads()
+                            Page.CHAT -> vm.showChat()
+                            Page.SETTINGS -> vm.showSettings()
+                            else -> Unit
                         }
-                    },
-                    onDisconnect = {
-                        drawerScope.launch {
-                            drawerState.close()
-                            vm.disconnect()
-                        }
-                    },
-                )
-            }
+                    }
+                },
+                onDisconnect = {
+                    drawerScope.launch {
+                        drawerState.close()
+                        vm.disconnect()
+                    }
+                },
+            )
         },
     ) {
         ZedAppContent(
@@ -415,7 +432,7 @@ private fun ZedTopBar(state: MobileState, vm: ZedViewModel, onOpenDrawer: () -> 
         },
         actions = {
             when (state.page) {
-                Page.THREADS -> IconButton(onClick = vm::createThread, enabled = !state.busy) {
+                Page.THREADS -> IconButton(onClick = vm::requestNewThread, enabled = !state.busy) {
                     Icon(Symbols.NewThread, contentDescription = "New thread", modifier = Modifier.size(20.dp))
                 }
 
@@ -523,3 +540,5 @@ private fun DrawerItem(
             .semantics { contentDescription = if (enabled) label else "$label requires a project or thread" },
     )
 }
+
+private const val DEBUG_PAIRING_QR_EXTRA = "dev.zed.mobile.DEBUG_PAIRING_QR"

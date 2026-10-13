@@ -3,7 +3,9 @@ package dev.zed.mobile
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
 import com.github.takahirom.roborazzi.RobolectricDeviceQualifiers
+import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
 import com.github.takahirom.roborazzi.captureRoboImage
+import com.github.takahirom.roborazzi.captureScreenRoboImage
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -178,6 +180,48 @@ class ScreenshotTest {
                 ThreadSummary("t4", "Investigate Wayland fractional scaling", "idle"),
             ),
         ),
+    )
+
+    private val claude = AgentInfo("claude-acp", "Claude Agent", isNative = false)
+    private val agents = listOf(AgentInfo("Zed Agent", "Zed Agent", isNative = true), claude, AgentInfo("gemini", "Gemini CLI", isNative = false))
+
+    /** The agent picker is a bottom sheet in its own window, so this captures every window. */
+    @OptIn(ExperimentalRoborazziApi::class)
+    @Test
+    fun threadsWithExternalAgents() {
+        compose.setContent {
+            ZedTheme {
+                ZedAppContent(
+                    state = MobileState(
+                        page = Page.THREADS,
+                        host = "100.99.221.90:7331",
+                        project = project,
+                        agents = agents,
+                        agentPickerVisible = true,
+                        threads = listOf(
+                            thread,
+                            ThreadSummary("t2", "Port the SSE client to OkHttp", "running", agent = claude),
+                            ThreadSummary("t3", "Review the gateway threat model", THREAD_STATUS_NEEDS_AUTHENTICATION, agent = agents[2]),
+                        ),
+                    ),
+                    vm = vm,
+                )
+            }
+        }
+        compose.waitForIdle()
+        captureScreenRoboImage("build/outputs/roborazzi/01c_threads_agent_picker.png")
+    }
+
+    @Test
+    fun externalAgentNeedsSignIn() = render(
+        "02c_chat_external_sign_in",
+        chatState(transcript = emptyList(), phase = TurnPhase.IDLE).let { state ->
+            state.copy(
+                selectedThread = ThreadSummary("t3", "Review the gateway threat model", THREAD_STATUS_NEEDS_AUTHENTICATION, agent = claude),
+                snapshot = state.snapshot?.copy(status = THREAD_STATUS_NEEDS_AUTHENTICATION),
+                configurationState = ConfigurationState(),
+            )
+        },
     )
 
     @Test

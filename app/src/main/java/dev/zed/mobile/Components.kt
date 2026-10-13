@@ -291,7 +291,7 @@ internal fun statusColor(status: String): Color {
     val value = status.lowercase()
     return when {
         value.contains("error") || value.contains("fail") -> ZedColors.Danger
-        value.contains("approval") || value.contains("waiting") -> ZedColors.Warning
+        value.contains("approval") || value.contains("waiting") || value.contains("authentication") -> ZedColors.Warning
         value.contains("run") || value.contains("progress") || value.contains("generat") ||
             value.contains("active") || value.contains("sending") -> ZedColors.Accent
         value.contains("complete") || value.contains("done") -> ZedColors.Success

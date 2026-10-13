@@ -39,6 +39,29 @@ private class FakeRepository : ZedRepository {
     override suspend fun thread(id: String) = snapshotGate?.await() ?: snapshot
     override suspend fun createThread(projectId: String) = summary
 
+    /** Null means an older desktop without the agents route. */
+    var agentList: List<AgentInfo>? = null
+    val createdWithAgent = mutableListOf<String?>()
+    val modeChanges = mutableListOf<String>()
+
+    override suspend fun agents(projectId: String) = agentList ?: throw GatewayException("Requires API v2.")
+
+    override suspend fun createThread(projectId: String, agentId: String?): ThreadSummary {
+        createdWithAgent += agentId
+        return summary.copy(agent = agentList?.firstOrNull { it.id == agentId })
+    }
+
+    override suspend fun setAgentMode(id: String, modeId: String): ThreadConfiguration {
+        modeChanges += modeId
+        return ThreadConfiguration(
+            model = null,
+            thinkingEnabled = false,
+            thinkingEffort = null,
+            agent = agentList?.firstOrNull { !it.isNative },
+            modes = AgentModes(modeId, listOf(AgentMode("default", "Default"), AgentMode(modeId, "Plan"))),
+        )
+    }
+
     override suspend fun send(id: String, text: String) {
         sends++
         if (failSend) throw GatewayException("Offline")
@@ -76,6 +99,40 @@ class ZedViewModelTest {
     @After
     fun teardown() {
         Dispatchers.resetMain()
+    }
+
+    @Test
+    fun `new threads use the built-in agent unless desktop offers external agents`() {
+        runTest(dispatcher) {
+            val repo = FakeRepository()
+            val vm = ZedViewModel(connect = { _, _ -> repo }, credentialStore = InMemoryCredentialStore())
+            vm.pair("https://desktop", "token"); advanceUntilIdle()
+            vm.openProject(repo.project); advanceUntilIdle()
+            assertTrue(vm.state.value.agents.isEmpty())
+            vm.requestNewThread(); advanceUntilIdle()
+            assertFalse(vm.state.value.agentPickerVisible)
+            assertEquals(listOf<String?>(null), repo.createdWithAgent)
+
+            vm.back(); advanceUntilIdle()
+            repo.agentList = listOf(AgentInfo("Zed Agent", "Zed Agent", true), AgentInfo("claude-acp", "Claude Agent", false))
+            vm.refresh(); advanceUntilIdle()
+            assertEquals(2, vm.state.value.agents.size)
+            vm.requestNewThread()
+            assertTrue(vm.state.value.agentPickerVisible)
+            vm.dismissAgentPicker()
+            assertFalse(vm.state.value.agentPickerVisible)
+            vm.requestNewThread(); vm.createThread("claude-acp"); advanceUntilIdle()
+            assertFalse(vm.state.value.agentPickerVisible)
+            assertEquals(listOf(null, "claude-acp"), repo.createdWithAgent)
+            assertEquals(Page.CHAT, vm.state.value.page)
+            assertEquals("Claude Agent", vm.state.value.selectedThread?.agent?.name)
+
+            vm.setAgentMode("plan"); advanceUntilIdle()
+            assertEquals(listOf("plan"), repo.modeChanges)
+            assertEquals("plan", vm.state.value.configuration?.modes?.current)
+            assertTrue(vm.state.value.configuration?.isExternalAgent == true)
+            vm.disconnect(); advanceUntilIdle()
+        }
     }
 
     @Test

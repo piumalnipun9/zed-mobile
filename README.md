@@ -1,6 +1,6 @@
 # Zed Mobile (Android)
 
-Zed Mobile is a focused Android companion for the local `Zed-Desktop` fork. On a private Tailscale network it lets you choose an open or recently used local project, continue a native Zed Agent thread, send prompts, see retained agent activity, answer tool approvals with any option desktop offers, answer the Agent's questions, adjust a thread's model/thinking configuration, review diffs and keep or reject the Agent's edits, and receive direct live task-completion notifications.
+Zed Mobile is a focused Android companion for the local `Zed-Desktop` fork. On a private Tailscale network it lets you choose an open or recently used local project, continue a Zed Agent or external agent thread (such as Claude Agent, Gemini CLI, or Codex), send prompts, see retained agent activity, answer tool approvals with any option desktop offers, answer the Agent's questions, adjust a thread's model/thinking configuration or an external agent's own modes and options, review diffs and keep or reject the Agent's edits, and receive direct live task-completion notifications.
 
 It intentionally does **not** expose a general filesystem, terminal, shell, or remote desktop interface.
 
@@ -38,6 +38,8 @@ Scan desktop QR → Projects → Threads → Agent chat → Changes
 
 The warm Material 3 UI is optimized for phone-sized screens. The chat renders user/assistant messages, collapsible thinking blocks, tool output, plans, compaction information, approval cards with every desktop option (including always-rules scoped to command patterns), Agent question forms, and a model/thinking configuration sheet. Older messages load on demand. The Changes page can Keep or Reject edits per file or all at once, undo the last reject, and page through large diffs.
 
+When desktop has external agents configured, **New thread** asks which agent to use. External agents bring their own desktop sign-in and models: sign in once on desktop, and a thread that still needs it shows a notice instead of failing silently. Their settings sheet lists the agent's own options (such as model or permission mode) or modes.
+
 A phone decision always names one of the desktop's own options for the call that is pending now; it cannot invent a rule, alter command input, or approve a stale tool call. The QR ticket expires after two minutes, but the successfully paired device credential persists until you remove the device in Zed-Desktop settings or forget the pairing on the phone.
 
 ## Build and test
@@ -66,6 +68,15 @@ Install it with Android Studio, or with ADB:
 
 ```sh
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Emulator pairing (debug builds only)
+
+Emulator images without Google Play services cannot run the QR scanner. Debug builds accept the same one-time `ZEDM2:` pairing value as an intent extra; release builds ignore it:
+
+```sh
+adb reverse tcp:7331 tcp:7331   # with the desktop gateway bound to 127.0.0.1:7331
+adb shell am start -S -n dev.zeddesktop.mobile/dev.zed.mobile.MainActivity --es dev.zed.mobile.DEBUG_PAIRING_QR 'ZEDM2:…'
 ```
 
 For a real-device test, ensure the phone and desktop are connected to the same tailnet before scanning the desktop QR code. Keep **Stay connected for Agent notifications** enabled in Settings, start or open a native Agent thread from Zed Mobile, background the app, then let that Agent turn finish to verify the generic completion notification. Events are intentionally dropped if the stream is offline; reopening the app later still lets you fetch the completed thread normally.

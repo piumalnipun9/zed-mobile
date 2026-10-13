@@ -363,7 +363,7 @@ internal fun ThreadScreen(state: MobileState, vm: ZedViewModel) {
                         title = "No threads yet",
                         detail = "Start a thread to send your first prompt to ${state.project?.name ?: "this project"}.",
                     )
-                    SmallButton("New thread", onClick = vm::createThread, enabled = !state.busy, tone = ButtonTone.Primary)
+                    SmallButton("New thread", onClick = vm::requestNewThread, enabled = !state.busy, tone = ButtonTone.Primary)
                 }
             }
         } else {
@@ -372,13 +372,45 @@ internal fun ThreadScreen(state: MobileState, vm: ZedViewModel) {
         itemsIndexed(state.threads, key = { _, thread -> thread.id }) { index, thread ->
             ListRow(
                 title = thread.title.ifBlank { "Untitled thread" },
-                subtitle = humanStatus(thread.status.ifBlank { "idle" }),
+                subtitle = listOfNotNull(
+                    thread.agent?.takeIf { !it.isNative }?.name,
+                    humanStatus(thread.status.ifBlank { "idle" }),
+                ).joinToString(" · "),
                 enabled = !state.busy,
                 onClick = { vm.openThread(thread) },
                 modifier = Modifier.semantics { contentDescription = "Open thread ${thread.title.ifBlank { "Untitled thread" }}" },
                 leading = { StatusDot(statusColor(thread.status)) },
             )
             if (index < state.threads.lastIndex) Hairline(inset = 35.dp)
+        }
+    }
+    if (state.agentPickerVisible) {
+        AgentPickerSheet(state.agents, enabled = !state.busy, onPick = vm::createThread, onDismiss = vm::dismissAgentPicker)
+    }
+}
+
+@Composable
+private fun AgentPickerSheet(
+    agents: List<AgentInfo>,
+    enabled: Boolean,
+    onPick: (String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    QuietSheet(onDismiss, "New thread") {
+        Text(
+            "External agents use their own sign-in and models on desktop.",
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = ZedColors.Muted,
+        )
+        agents.forEach { agent ->
+            ListRow(
+                title = agent.name,
+                subtitle = if (agent.isNative) "Built-in" else "External agent",
+                enabled = enabled,
+                onClick = { onPick(if (agent.isNative) null else agent.id) },
+                modifier = Modifier.semantics { contentDescription = "Start a thread with ${agent.name}" },
+            )
         }
     }
 }
