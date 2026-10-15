@@ -60,6 +60,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -74,7 +76,12 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /** Approval callbacks. [onResolve] is the one-time allow/deny shorthand for older desktops. */
@@ -142,8 +149,21 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
         showConfiguration = true
     }
 
+    // Opening a thread starts at its newest message. Wait until the list has laid out the loaded
+    // entries (this effect runs in the same frame they arrive) and land at the very bottom of the
+    // last item, so a long final reply is not cut off.
+    val loadedItems = if (hasRichTranscript) transcript.size + leadingItems else messages.size
+    var openedAtEnd by remember(threadId) { mutableStateOf(false) }
+    LaunchedEffect(threadId, loadedItems > 0) {
+        if (openedAtEnd || loadedItems == 0) return@LaunchedEffect
+        val count = snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it >= loadedItems }
+        listState.scrollToItem(count - 1, Int.MAX_VALUE)
+        openedAtEnd = true
+    }
+
     LaunchedEffect(transcript.size, messages.size, state.pendingMessage?.localId, state.turnPhase, state.approvals.size, state.snapshot?.id) {
-        if (nearBottom && listState.layoutInfo.totalItemsCount > 0) {
+        if (openedAtEnd && nearBottom && listState.layoutInfo.totalItemsCount > 0) {
+            withFrameNanos { }
             listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
         }
     }
@@ -363,8 +383,37 @@ private fun UserMessage(text: String, footer: (@Composable () -> Unit)? = null) 
 
 @Composable
 private fun AssistantText(text: String) {
+    val body = MaterialTheme.typography.bodyLarge
     SelectionContainer {
-        Text(text, modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyLarge, color = ZedColors.Text)
+        Markdown(
+            content = text,
+            modifier = Modifier.fillMaxWidth(),
+            colors = markdownColor(
+                text = ZedColors.Text,
+                codeText = ZedColors.Text,
+                inlineCodeText = ZedColors.Text,
+                linkText = ZedColors.Accent,
+                codeBackground = ZedColors.Subtle,
+                inlineCodeBackground = ZedColors.Subtle,
+                dividerColor = ZedColors.Hairline,
+            ),
+            typography = markdownTypography(
+                h1 = MaterialTheme.typography.titleLarge,
+                h2 = MaterialTheme.typography.titleMedium,
+                h3 = MaterialTheme.typography.titleSmall,
+                h4 = MaterialTheme.typography.titleSmall,
+                h5 = MaterialTheme.typography.titleSmall,
+                h6 = MaterialTheme.typography.titleSmall,
+                text = body,
+                paragraph = body,
+                ordered = body,
+                bullet = body,
+                list = body,
+                quote = body.copy(color = ZedColors.Muted),
+                code = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                inlineCode = body.copy(fontFamily = FontFamily.Monospace),
+            ),
+        )
     }
 }
 

@@ -225,6 +225,44 @@ class ScreenshotTest {
     )
 
     @Test
+    @Config(qualifiers = "w412dp-h1300dp-xxhdpi")
+    fun chatMarkdown() = render(
+        "02d_chat_markdown",
+        chatState(
+            transcript = listOf(
+                TranscriptEntry(0, "user_message", text = "Summarize the fix."),
+                TranscriptEntry(
+                    1, "assistant_message",
+                    chunks = listOf(
+                        TranscriptChunk(
+                            "message",
+                            """
+                            ## Lexer fix
+
+                            The lexer now **keeps quote state** across newlines, so `emit_token` runs once per template.
+
+                            1. Track open quotes
+                            2. Emit one multi-line token
+                            - Added a regression test
+                            - Ran `cargo test -p editor`
+
+                            ```rust
+                            fn lex(input: &str) -> Vec<Token> {
+                                Lexer::new(input).collect()
+                            }
+                            ```
+
+                            > All 214 editor tests pass.
+                            """.trimIndent(),
+                        ),
+                    ),
+                ),
+            ),
+            phase = TurnPhase.IDLE,
+        ),
+    )
+
+    @Test
     fun settings() = render(
         "05_settings",
         MobileState(page = Page.SETTINGS, host = "100.99.221.90:7331", project = project, selectedThread = thread),

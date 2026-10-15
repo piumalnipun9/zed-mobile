@@ -1,6 +1,7 @@
 package dev.zed.mobile
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -164,12 +166,27 @@ fun ZedApp(
     val appContext = LocalContext.current.applicationContext
     val connectionSettings = remember(appContext) { AndroidConnectionSettingsStore(appContext) }
     var stayConnected by remember(connectionSettings) { mutableStateOf<Boolean?>(null) }
+    var allowScreenshots by remember(connectionSettings) { mutableStateOf(false) }
+    val activity = LocalContext.current as? Activity
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
     val settingsScope = rememberCoroutineScope()
 
     LaunchedEffect(connectionSettings) {
         connectionSettings.stayConnected.collect { stayConnected = it }
+    }
+    LaunchedEffect(connectionSettings) {
+        connectionSettings.allowScreenshots.collect { allowScreenshots = it }
+    }
+    // onCreate sets FLAG_SECURE before anything is drawn; it is lifted only after the stored
+    // preference says the user opted in.
+    LaunchedEffect(activity, allowScreenshots) {
+        val window = activity?.window ?: return@LaunchedEffect
+        if (allowScreenshots) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
     }
     LaunchedEffect(state.hasPersistentPairing, stayConnected) {
         when {
@@ -253,6 +270,10 @@ fun ZedApp(
                     if (!enabled) GatewayEventService.stop(appContext)
                 }
             },
+            allowScreenshots = allowScreenshots,
+            onAllowScreenshotsChange = { allowed ->
+                settingsScope.launch { connectionSettings.setAllowScreenshots(allowed) }
+            },
             onOpenDrawer = { drawerScope.launch { drawerState.open() } },
         )
     }
@@ -271,6 +292,8 @@ internal fun ZedAppContent(
     onScanQr: () -> Unit = {},
     stayConnected: Boolean = true,
     onStayConnectedChange: (Boolean) -> Unit = {},
+    allowScreenshots: Boolean = false,
+    onAllowScreenshotsChange: (Boolean) -> Unit = {},
     onOpenDrawer: () -> Unit = {},
 ) {
     Scaffold(
@@ -283,6 +306,9 @@ internal fun ZedAppContent(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(contentPadding)
+                // The keyboard inset already includes the navigation bar that contentPadding
+                // reserved; consume it so the composer sits just above the keyboard.
+                .consumeWindowInsets(contentPadding)
                 .imePadding(),
         ) {
             // A hairline progress track replaces the divider while a request is in flight.
@@ -319,6 +345,8 @@ internal fun ZedAppContent(
                         vm = vm,
                         stayConnected = stayConnected,
                         onStayConnectedChange = onStayConnectedChange,
+                        allowScreenshots = allowScreenshots,
+                        onAllowScreenshotsChange = onAllowScreenshotsChange,
                     )
                 }
             }

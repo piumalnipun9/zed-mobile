@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.map
 
 private val Context.zedConnectionSettingsDataStore by preferencesDataStore(name = "zed_mobile_settings")
 private val stayConnectedKey = booleanPreferencesKey("stay_connected_for_agent_notifications")
+private val allowScreenshotsKey = booleanPreferencesKey("allow_screenshots")
 
 /**
  * Persists the user's choice to keep the direct desktop event connection active. The default is
@@ -24,6 +25,17 @@ class AndroidConnectionSettingsStore(context: Context) {
     suspend fun setStayConnected(enabled: Boolean) {
         appContext.zedConnectionSettingsDataStore.edit { preferences ->
             preferences[stayConnectedKey] = enabled
+        }
+    }
+
+    /** Screenshots stay blocked unless the user opts in. */
+    val allowScreenshots: Flow<Boolean> = appContext.zedConnectionSettingsDataStore.data.map { preferences ->
+        preferences[allowScreenshotsKey] ?: false
+    }
+
+    suspend fun setAllowScreenshots(allowed: Boolean) {
+        appContext.zedConnectionSettingsDataStore.edit { preferences ->
+            preferences[allowScreenshotsKey] = allowed
         }
     }
 }

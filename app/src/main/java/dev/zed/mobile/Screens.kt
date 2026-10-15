@@ -112,6 +112,8 @@ internal fun SettingsScreen(
     vm: ZedViewModel,
     stayConnected: Boolean,
     onStayConnectedChange: (Boolean) -> Unit,
+    allowScreenshots: Boolean = false,
+    onAllowScreenshotsChange: (Boolean) -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -157,7 +159,30 @@ internal fun SettingsScreen(
         SectionLabel("Privacy")
         SettingRow("Credential", "Encrypted with Android Keystore")
         Hairline(inset = 16.dp)
-        SettingRow("Screenshots", "Blocked while the app is open")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onAllowScreenshotsChange(!allowScreenshots) }
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .semantics { contentDescription = "Allow screenshots" },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Allow screenshots", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Off hides this app from screenshots, screen recording, and the app switcher.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ZedColors.Muted,
+                )
+            }
+            Switch(
+                checked = allowScreenshots,
+                onCheckedChange = onAllowScreenshotsChange,
+                colors = quietSwitchColors(),
+                modifier = Modifier.scale(0.8f),
+            )
+        }
         Hairline(inset = 16.dp)
         SettingRow("Desktop access", "Open and recently opened projects only")
 
