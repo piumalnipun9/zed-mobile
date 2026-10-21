@@ -13,6 +13,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -66,7 +67,7 @@ internal fun SmallButton(
             modifier = sized,
             shape = shape,
             contentPadding = padding,
-            colors = ButtonDefaults.buttonColors(containerColor = ZedColors.Text, contentColor = Color.White),
+            colors = ButtonDefaults.buttonColors(containerColor = ZedColors.Accent, contentColor = Color.White),
         ) { Text(text, style = MaterialTheme.typography.labelLarge, maxLines = 1) }
 
         ButtonTone.Secondary -> OutlinedButton(
@@ -274,64 +275,102 @@ internal fun ThinkingDots(color: Color = ZedColors.Muted) {
     }
 }
 
+/** A rounded white group with a hairline border; rows inside are separated by inset hairlines. */
 @Composable
-internal fun ZedBrandMark(size: Dp, tint: Color = ZedColors.Text, contentDescription: String? = null) {
-    Icon(
-        painter = painterResource(id = R.drawable.zed_logo),
-        contentDescription = contentDescription,
-        tint = tint,
-        modifier = Modifier.size(size),
+internal fun CardGroup(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clip(MaterialTheme.shapes.large)
+            .background(ZedColors.Surface)
+            .border(1.dp, ZedColors.Hairline, MaterialTheme.shapes.large),
+        content = content,
     )
 }
+
+/** A small rounded label naming the project a thread belongs to. */
+@Composable
+internal fun ProjectTag(name: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .clip(MaterialTheme.shapes.extraSmall)
+            .background(ZedColors.Subtle)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(Symbols.Folder, contentDescription = null, tint = ZedColors.Muted, modifier = Modifier.size(11.dp))
+        Text(
+            name,
+            style = MaterialTheme.typography.labelSmall,
+            color = ZedColors.Muted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** How a thread's desktop status reads in lists; idle threads need no label. */
+internal fun threadStatusLabel(status: String): String? = when (status) {
+    "running" -> "Working"
+    "waiting_for_approval" -> "Needs your approval"
+    "needs_authentication" -> "Sign in on desktop"
+    "initializing" -> "Starting"
+    "error" -> "Stopped with an error"
+    "idle", "", "completed" -> null
+    else -> humanStatus(status)
+}
+
+internal fun threadStatusColor(status: String): Color = when (status) {
+    "running", "initializing" -> ZedColors.AccentText
+    "waiting_for_approval", "needs_authentication" -> ZedColors.Warning
+    "error" -> ZedColors.Danger
+    else -> ZedColors.Muted
+}
+
+/** Shows a home-relative path, which is what people recognize on a phone-width screen. */
+internal fun shortPath(path: String): String =
+    Regex("^/(home|Users)/[^/]+").replace(path, "~")
 
 internal fun humanStatus(status: String): String =
     status.trim().replace('_', ' ').replace('-', ' ').lowercase().replaceFirstChar { it.uppercase() }
 
-internal fun statusColor(status: String): Color {
-    val value = status.lowercase()
-    return when {
-        value.contains("error") || value.contains("fail") -> ZedColors.Danger
-        value.contains("approval") || value.contains("waiting") || value.contains("authentication") -> ZedColors.Warning
-        value.contains("run") || value.contains("progress") || value.contains("generat") ||
-            value.contains("active") || value.contains("sending") -> ZedColors.Accent
-        value.contains("complete") || value.contains("done") -> ZedColors.Success
-        else -> ZedColors.Faint
-    }
-}
-
 /**
- * Material Symbols (Outlined, weight 300) used across the app, so every icon shares one stroke
- * weight. Sources live in `res/drawable/ms_*.xml`.
+ * Lucide line icons (ISC License) at a 1.75 stroke, so every icon shares one weight. Sources live
+ * in `res/drawable/lc_*.xml`.
  */
 internal object Symbols {
-    val Add: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_add)
-    val ArrowBack: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_arrow_back)
-    val ArrowUpward: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_arrow_upward)
-    val Asterisk: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_asterisk)
-    val AttachFile: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_attach_file)
-    val Block: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_block)
-    val ChatBubble: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_chat_bubble)
-    val Check: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_check)
-    val CheckBox: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_check_box)
-    val CheckBoxBlank: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_check_box_outline_blank)
-    val CheckCircle: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_check_circle)
-    val ChevronRight: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_chevron_right)
-    val Close: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_close)
-    val Description: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_description)
-    val Dns: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_dns)
-    val Error: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_error)
-    val ExpandLess: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_expand_less)
-    val ExpandMore: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_expand_more)
-    val Folder: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_folder)
-    val List: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_list)
-    val Logout: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_logout)
-    val Menu: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_menu)
-    val MoreHoriz: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_more_horiz)
-    val NewThread: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_edit_square)
-    val RadioChecked: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_radio_button_checked)
-    val RadioUnchecked: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_radio_button_unchecked)
-    val Search: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_search)
-    val Settings: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_settings)
-    val Stop: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_stop)
-    val Tune: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_tune)
+    val Add: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_plus)
+    val ArrowBack: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_arrow_left)
+    val ArrowDown: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_arrow_down)
+    val ArrowUpward: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_arrow_up)
+    val Asterisk: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_asterisk)
+    val Block: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_ban)
+    val Bot: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_bot)
+    val ChatBubble: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_message_circle)
+    val Check: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_check)
+    val CheckBox: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_square_check)
+    val CheckBoxBlank: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_square)
+    val CheckCircle: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_circle_check)
+    val ChevronRight: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_chevron_right)
+    val Close: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_x)
+    val Description: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_file_text)
+    val Dns: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_server)
+    val Error: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_circle_alert)
+    val ExpandLess: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_chevron_up)
+    val ExpandMore: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_chevron_down)
+    val Folder: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_folder)
+    val FolderOpenFilled: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_folder_open_filled)
+    val Laptop: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_laptop)
+    val LaptopOff: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_laptop_off)
+    val Logout: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_log_out)
+    val Menu: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_menu)
+    val RadioChecked: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_circle_dot)
+    val RadioUnchecked: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_circle)
+    val Search: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_search)
+    val Settings: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_settings)
+    val Sparkles: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_sparkles)
+    val Stop: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_square)
+    val Tune: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_sliders_horizontal)
 }

@@ -1,6 +1,9 @@
 package dev.zed.mobile
 
 import androidx.compose.foundation.background
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -58,7 +61,7 @@ internal fun PairScreen(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 24.dp, vertical = 40.dp),
     ) {
-        ZedBrandMark(size = 36.dp, contentDescription = "Zed")
+        Mascot(size = 72.dp)
         Spacer(Modifier.height(28.dp))
         Text("Connect to Zed Desktop", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(8.dp))
@@ -119,90 +122,105 @@ internal fun SettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(bottom = 32.dp),
+            .padding(top = 4.dp, bottom = 32.dp),
     ) {
-        SectionLabel("Connection")
-        SettingRow("Desktop", state.host.ifBlank { "Not connected" }, monospace = true)
-        Hairline(inset = 16.dp)
-        SettingRow("Project", state.project?.name ?: "None selected")
-        state.selectedThread?.let {
-            Hairline(inset = 16.dp)
-            SettingRow("Thread", it.title.ifBlank { "Untitled thread" })
+        SettingsLabel("Desktop")
+        CardGroup {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Zed Desktop", style = MaterialTheme.typography.titleMedium)
+                ConnectionLine(state)
+            }
         }
 
-        SectionLabel("Notifications")
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onStayConnectedChange(!stayConnected) }
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-                .semantics { contentDescription = "Stay connected for Agent notifications" },
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Stay connected", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Get notified when an Agent task finishes or fails.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = ZedColors.Muted,
-                )
-            }
-            Switch(
+        SettingsLabel("Notifications")
+        CardGroup {
+            SwitchRow(
+                title = "Stay connected",
+                detail = "Get notified when an agent task finishes or fails.",
                 checked = stayConnected,
                 onCheckedChange = onStayConnectedChange,
-                colors = quietSwitchColors(),
-                modifier = Modifier.scale(0.8f),
+                description = "Stay connected for Agent notifications",
             )
         }
 
-        SectionLabel("Privacy")
-        SettingRow("Credential", "Encrypted with Android Keystore")
-        Hairline(inset = 16.dp)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onAllowScreenshotsChange(!allowScreenshots) }
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-                .semantics { contentDescription = "Allow screenshots" },
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Allow screenshots", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Off hides this app from screenshots, screen recording, and the app switcher.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = ZedColors.Muted,
-                )
-            }
-            Switch(
+        SettingsLabel("Privacy")
+        CardGroup {
+            SwitchRow(
+                title = "Allow screenshots",
+                detail = "Off hides this app from screenshots, screen recording, and the app switcher.",
                 checked = allowScreenshots,
                 onCheckedChange = onAllowScreenshotsChange,
-                colors = quietSwitchColors(),
-                modifier = Modifier.scale(0.8f),
             )
+            Hairline(inset = 16.dp)
+            SettingRow("Credential", "Encrypted on this phone")
+            Hairline(inset = 16.dp)
+            SettingRow("Desktop access", "Open and recent projects")
         }
-        Hairline(inset = 16.dp)
-        SettingRow("Desktop access", "Open and recently opened projects only")
 
-        Spacer(Modifier.height(24.dp))
-        Hairline()
-        Text(
-            "Disconnect this phone",
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = !state.busy, onClick = vm::disconnect)
-                .padding(horizontal = 16.dp, vertical = 16.dp),
-            style = MaterialTheme.typography.titleMedium,
-            color = ZedColors.Danger,
-        )
-        Hairline()
+        Spacer(Modifier.height(28.dp))
+        CardGroup {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = vm::disconnect)
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(Symbols.Logout, contentDescription = null, tint = ZedColors.Danger, modifier = Modifier.size(20.dp))
+                Text("Disconnect this phone", style = MaterialTheme.typography.titleMedium, color = ZedColors.Danger)
+            }
+        }
         Text(
             "Removes this phone's credential. Remove the device in desktop settings to revoke it there too.",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
             style = MaterialTheme.typography.bodySmall,
             color = ZedColors.Faint,
+        )
+        Spacer(Modifier.height(24.dp))
+        Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Mascot(size = 32.dp, mood = MascotMood.Sleeping)
+            Text("Zed Mobile", style = MaterialTheme.typography.labelMedium, color = ZedColors.Faint, modifier = Modifier.padding(top = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun SettingsLabel(text: String) {
+    Text(
+        text,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 8.dp),
+        style = MaterialTheme.typography.labelMedium,
+        color = ZedColors.Muted,
+    )
+}
+
+@Composable
+private fun SwitchRow(
+    title: String,
+    detail: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    description: String = title,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .semantics { contentDescription = description },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = ZedColors.Muted)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = quietSwitchColors(),
+            modifier = Modifier.scale(0.85f),
         )
     }
 }
@@ -230,7 +248,7 @@ private fun SettingRow(label: String, value: String, monospace: Boolean = false)
 
 @Composable
 internal fun quietSwitchColors() = SwitchDefaults.colors(
-    checkedTrackColor = ZedColors.Text,
+    checkedTrackColor = ZedColors.Accent,
     checkedThumbColor = Color.White,
     uncheckedTrackColor = ZedColors.Subtle,
     uncheckedBorderColor = ZedColors.Hairline,
@@ -238,132 +256,328 @@ internal fun quietSwitchColors() = SwitchDefaults.colors(
 )
 
 @Composable
-internal fun SearchField(value: String, onValueChange: (String) -> Unit, placeholder: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
-            .clip(MaterialTheme.shapes.small)
-            .background(ZedColors.Subtle)
-            .heightIn(min = 40.dp)
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Icon(Symbols.Search, contentDescription = null, tint = ZedColors.Faint, modifier = Modifier.size(18.dp))
-        Box(modifier = Modifier.weight(1f)) {
-            if (value.isEmpty()) {
-                Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = ZedColors.Faint)
-            }
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                singleLine = true,
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = ZedColors.Text),
-                cursorBrush = SolidColor(ZedColors.Accent),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .semantics { contentDescription = placeholder },
-            )
-        }
-    }
-}
-
-@Composable
-internal fun ProjectScreen(state: MobileState, vm: ZedViewModel) {
-    var query by remember { mutableStateOf("") }
-    // The desktop catalog is already ordered by last opened time; keep that order.
-    val projects = remember(state.projects, query) {
-        state.projects.filter {
-            query.isBlank() ||
-                it.name.contains(query, ignoreCase = true) ||
-                it.path.contains(query, ignoreCase = true) ||
-                it.kind.contains(query, ignoreCase = true) ||
-                it.connectionName?.contains(query, ignoreCase = true) == true
-        }
-    }
-    val desktopAvailable = !state.gatewayUnavailable
-    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-        item(key = "connection") {
-            Row(
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                StatusDot(if (desktopAvailable) ZedColors.Success else ZedColors.Warning)
-                Text(
-                    if (desktopAvailable) "Connected" else "Desktop unreachable · showing last known projects",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = ZedColors.Muted,
-                )
-                if (desktopAvailable && state.host.isNotBlank()) {
-                    Text(state.host, style = CodeTextStyle.copy(color = ZedColors.Faint), maxLines = 1)
+internal fun HomeScreen(state: MobileState, vm: ZedViewModel) {
+    val recents = state.recents.take(4)
+    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp)) {
+        item(key = "desktop") { DesktopCard(state, onReconnect = vm::refresh) }
+        state.notice?.let { notice -> item(key = "notice") { InlineNotice(notice) } }
+        if (recents.isNotEmpty()) {
+            item(key = "recents-label") { HomeSectionLabel("Recents") }
+            item(key = "recents") {
+                CardGroup {
+                    recents.forEachIndexed { index, recent ->
+                        ThreadRow(
+                            thread = recent.thread,
+                            projectName = recent.project.name,
+                            onClick = { vm.openThread(recent.thread, recent.project) },
+                        )
+                        if (index < recents.lastIndex) Hairline(inset = 48.dp)
+                    }
                 }
             }
         }
-        state.notice?.let { notice -> item(key = "notice") { InlineNotice(notice) } }
-        item(key = "search") { SearchField(query, { query = it }, "Search projects") }
-        if (projects.isEmpty()) {
+        item(key = "projects-label") { HomeSectionLabel("Projects") }
+        if (state.projects.isEmpty()) {
             item(key = "empty") {
-                EmptyState(
-                    title = if (state.projects.isEmpty()) "No projects yet" else "No matches",
-                    detail = if (state.projects.isEmpty()) {
-                        "Open a project in desktop Zed once and it will appear here."
-                    } else {
-                        "Try another name or path."
-                    },
+                MascotMessage(
+                    title = "No projects yet",
+                    detail = "Open a project in Zed on your desktop and it will show up here.",
                 )
             }
         } else {
-            item(key = "label") { SectionLabel(if (desktopAvailable) "Recent" else "Last known") }
-        }
-        itemsIndexed(projects, key = { _, project -> project.id }) { index, project ->
-            ProjectRow(
-                project = project,
-                enabled = !state.busy && desktopAvailable,
-                onClick = { vm.openProject(project) },
-            )
-            if (index < projects.lastIndex) Hairline(inset = 52.dp)
+            item(key = "projects") {
+                CardGroup {
+                    state.projects.forEachIndexed { index, project ->
+                        ProjectEntry(state, project, vm)
+                        if (index < state.projects.lastIndex) Hairline()
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun ProjectRow(project: Project, enabled: Boolean, onClick: () -> Unit) {
-    val remote = project.kind != PROJECT_KIND_LOCAL
-    val status = when {
-        project.opening -> "Connecting…"
-        project.isOpen -> null
-        else -> "Not open"
-    }
-    ListRow(
-        title = project.name,
-        subtitle = if (remote) "${project.sourceLabel()} · ${project.path}" else project.path,
-        subtitleMonospace = !remote,
-        enabled = enabled,
-        onClick = onClick,
-        modifier = Modifier.semantics {
-            contentDescription = when {
-                project.opening -> "Project ${project.name} is connecting on desktop"
-                project.isOpen -> "Open project ${project.name}"
-                else -> "Open ${project.name} on desktop"
-            }
-        },
-        leading = {
-            Icon(
-                if (remote) Symbols.Dns else Symbols.Folder,
-                contentDescription = null,
-                tint = if (project.isOpen) ZedColors.Text else ZedColors.Faint,
-                modifier = Modifier.size(22.dp),
-            )
-        },
-        trailing = {
-            when {
-                status != null -> Text(status, style = MaterialTheme.typography.bodySmall, color = ZedColors.Faint)
-                else -> StatusDot(ZedColors.Success, size = 6.dp)
-            }
-        },
+private fun HomeSectionLabel(text: String) {
+    Text(
+        text,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 8.dp),
+        style = MaterialTheme.typography.labelMedium,
+        color = ZedColors.Muted,
     )
+}
+
+/** The paired desktop, with Claude-style connection status: a laptop icon and a clear word. */
+@Composable
+private fun DesktopCard(state: MobileState, onReconnect: () -> Unit) {
+    val connected = !state.gatewayUnavailable
+    CardGroup(modifier = Modifier.padding(top = 8.dp)) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            if (connected) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(MaterialTheme.shapes.medium)
+                        .background(ZedColors.AccentSoft),
+                    contentAlignment = Alignment.Center,
+                ) { Mascot(size = 28.dp) }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(MaterialTheme.shapes.medium)
+                        .background(ZedColors.Subtle),
+                    contentAlignment = Alignment.Center,
+                ) { Mascot(size = 28.dp, mood = MascotMood.Sleeping) }
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text("Zed Desktop", style = MaterialTheme.typography.titleMedium)
+                ConnectionLine(state, showHost = connected)
+            }
+            if (!connected) SmallButton("Reconnect", onClick = onReconnect, tone = ButtonTone.Secondary)
+        }
+        if (!connected) {
+            Text(
+                "Showing the last projects this phone saw. Check that Zed is running and Tailscale is on.",
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = ZedColors.Muted,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProjectEntry(state: MobileState, project: Project, vm: ZedViewModel) {
+    val expanded = project.id in state.expandedProjectIds
+    val opening = project.id in state.openingProjectIds || project.opening
+    val remote = project.kind != PROJECT_KIND_LOCAL
+    val available = !state.gatewayUnavailable
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = available && !opening) { vm.toggleProject(project) }
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .semantics {
+                contentDescription = when {
+                    opening -> "Project ${project.name} is opening on desktop"
+                    !project.isOpen -> "Open ${project.name} on desktop"
+                    expanded -> "Collapse project ${project.name}"
+                    else -> "Open project ${project.name}"
+                }
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Icon(
+            when {
+                remote -> Symbols.Dns
+                expanded -> Symbols.FolderOpenFilled
+                else -> Symbols.Folder
+            },
+            contentDescription = null,
+            tint = ZedColors.Text,
+            modifier = Modifier.size(22.dp),
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(project.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                when {
+                    opening -> "Opening on desktop…"
+                    !project.isOpen && remote -> "${project.sourceLabel()} · Tap to open on desktop"
+                    !project.isOpen -> "Not open · Tap to open on desktop"
+                    remote -> "${project.sourceLabel()} · ${shortPath(project.path)}"
+                    else -> shortPath(project.path)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (opening) ZedColors.AccentText else ZedColors.Muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        when {
+            opening -> CircularProgressIndicator(
+                modifier = Modifier.size(16.dp),
+                color = ZedColors.Accent,
+                strokeWidth = 1.75.dp,
+            )
+            project.isOpen -> {
+                val count = state.projectThreads[project.id]?.size
+                if (count != null && count > 0 && !expanded) {
+                    Text("$count", style = MaterialTheme.typography.labelMedium, color = ZedColors.Faint)
+                }
+                Icon(
+                    if (expanded) Symbols.ExpandLess else Symbols.ExpandMore,
+                    contentDescription = null,
+                    tint = ZedColors.Faint,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+    AnimatedVisibility(visible = expanded && project.isOpen) {
+        Column(modifier = Modifier.padding(bottom = 6.dp)) {
+            val threads = state.projectThreads[project.id]
+            when {
+                threads == null -> Text(
+                    "Loading threads…",
+                    modifier = Modifier.padding(start = 66.dp, top = 4.dp, bottom = 8.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ZedColors.Faint,
+                )
+                threads.isEmpty() -> Text(
+                    "No threads yet",
+                    modifier = Modifier.padding(start = 66.dp, top = 4.dp, bottom = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = ZedColors.Faint,
+                )
+                else -> threads.forEach { thread ->
+                    ThreadRow(thread = thread, projectName = null, indent = 50.dp, onClick = { vm.openThread(thread, project) })
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { vm.startNewThread(project.id) }
+                    .padding(start = 66.dp, end = 16.dp, top = 10.dp, bottom = 10.dp)
+                    .semantics { contentDescription = "New thread in ${project.name}" },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(Symbols.Add, contentDescription = null, tint = ZedColors.AccentText, modifier = Modifier.size(16.dp))
+                Text("New thread", style = MaterialTheme.typography.labelLarge, color = ZedColors.AccentText)
+            }
+        }
+    }
+}
+
+/** One thread: a chat mark, its title, and a quiet line with project, agent and status. */
+@Composable
+internal fun ThreadRow(
+    thread: ThreadSummary,
+    projectName: String?,
+    onClick: () -> Unit,
+    indent: androidx.compose.ui.unit.Dp = 0.dp,
+) {
+    val status = threadStatusLabel(thread.status)
+    val agent = thread.agent?.takeIf { !it.isNative }?.name
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(start = 16.dp + indent, end = 16.dp, top = 12.dp, bottom = 12.dp)
+            .semantics { contentDescription = "Open thread ${thread.title.ifBlank { "New thread" }}" },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Icon(Symbols.ChatBubble, contentDescription = null, tint = ZedColors.Muted, modifier = Modifier.size(18.dp))
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                thread.title.ifBlank { "New thread" },
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (projectName != null || status != null || agent != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    projectName?.let { ProjectTag(it, modifier = Modifier.widthIn(max = 140.dp)) }
+                    val detail = listOfNotNull(agent, status).joinToString(" · ")
+                    if (detail.isNotEmpty()) {
+                        Text(
+                            detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (status != null) threadStatusColor(thread.status) else ZedColors.Muted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+        if (isActiveThreadStatus(thread.status)) StatusDot(threadStatusColor(thread.status), size = 7.dp)
+    }
+}
+
+/** Asks only what is ambiguous: the project when several are open, then the agent. */
+@Composable
+internal fun NewThreadSheet(state: MobileState, request: NewThreadRequest, vm: ZedViewModel) {
+    val project = request.projectId?.let { id -> state.projects.firstOrNull { it.id == id } }
+    QuietSheet(onDismiss = vm::dismissNewThread, title = "New thread") {
+        if (project == null) {
+            Text(
+                "Choose a project",
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = ZedColors.Muted,
+            )
+            val open = state.projects.filter { it.isOpen }
+            if (open.isEmpty()) {
+                InlineNotice("Open a project in Zed on your desktop first.")
+            }
+            open.forEach { candidate ->
+                SheetChoice(
+                    icon = if (candidate.kind != PROJECT_KIND_LOCAL) Symbols.Dns else Symbols.Folder,
+                    title = candidate.name,
+                    subtitle = shortPath(candidate.path),
+                    onClick = { vm.startNewThread(candidate.id) },
+                )
+            }
+        } else {
+            Text(
+                "Choose an agent for ${project.name}",
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = ZedColors.Muted,
+            )
+            val agents = state.projectAgents[project.id].orEmpty().ifEmpty {
+                listOf(AgentInfo("Zed Agent", "Zed Agent", isNative = true))
+            }
+            agents.forEach { agent ->
+                SheetChoice(
+                    icon = if (agent.isNative) Symbols.Sparkles else Symbols.Bot,
+                    title = agent.name,
+                    subtitle = if (agent.isNative) "Built into Zed" else "External agent · signs in on desktop",
+                    onClick = { vm.createThread(project.id, if (agent.isNative) null else agent.id) },
+                    description = "Start a thread with ${agent.name}",
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SheetChoice(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    description: String = title,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .semantics { contentDescription = description },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(MaterialTheme.shapes.medium)
+                .background(ZedColors.Subtle),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, contentDescription = null, tint = ZedColors.Text, modifier = Modifier.size(20.dp)) }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = ZedColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
 }
 
 internal fun Project.sourceLabel(): String {
@@ -375,69 +589,6 @@ internal fun Project.sourceLabel(): String {
         else -> "Local"
     }
     return connectionName?.takeIf(String::isNotBlank)?.let { "$source · $it" } ?: source
-}
-
-@Composable
-internal fun ThreadScreen(state: MobileState, vm: ZedViewModel) {
-    LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-        state.notice?.let { notice -> item(key = "notice") { InlineNotice(notice) } }
-        if (state.threads.isEmpty()) {
-            item(key = "empty") {
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    EmptyState(
-                        title = "No threads yet",
-                        detail = "Start a thread to send your first prompt to ${state.project?.name ?: "this project"}.",
-                    )
-                    SmallButton("New thread", onClick = vm::requestNewThread, enabled = !state.busy, tone = ButtonTone.Primary)
-                }
-            }
-        } else {
-            item(key = "label") { SectionLabel("${state.threads.size} ${if (state.threads.size == 1) "thread" else "threads"}") }
-        }
-        itemsIndexed(state.threads, key = { _, thread -> thread.id }) { index, thread ->
-            ListRow(
-                title = thread.title.ifBlank { "Untitled thread" },
-                subtitle = listOfNotNull(
-                    thread.agent?.takeIf { !it.isNative }?.name,
-                    humanStatus(thread.status.ifBlank { "idle" }),
-                ).joinToString(" · "),
-                enabled = !state.busy,
-                onClick = { vm.openThread(thread) },
-                modifier = Modifier.semantics { contentDescription = "Open thread ${thread.title.ifBlank { "Untitled thread" }}" },
-                leading = { StatusDot(statusColor(thread.status)) },
-            )
-            if (index < state.threads.lastIndex) Hairline(inset = 35.dp)
-        }
-    }
-    if (state.agentPickerVisible) {
-        AgentPickerSheet(state.agents, enabled = !state.busy, onPick = vm::createThread, onDismiss = vm::dismissAgentPicker)
-    }
-}
-
-@Composable
-private fun AgentPickerSheet(
-    agents: List<AgentInfo>,
-    enabled: Boolean,
-    onPick: (String?) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    QuietSheet(onDismiss, "New thread") {
-        Text(
-            "External agents use their own sign-in and models on desktop.",
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            color = ZedColors.Muted,
-        )
-        agents.forEach { agent ->
-            ListRow(
-                title = agent.name,
-                subtitle = if (agent.isNative) "Built-in" else "External agent",
-                enabled = enabled,
-                onClick = { onPick(if (agent.isNative) null else agent.id) },
-                modifier = Modifier.semantics { contentDescription = "Start a thread with ${agent.name}" },
-            )
-        }
-    }
 }
 
 @Composable
@@ -621,7 +772,7 @@ private data class RejectRequest(val paths: List<String>?)
 @Composable
 private fun ChangedFileRow(file: ChangedFile, expanded: Boolean, onClick: () -> Unit) {
     val name = file.path.substringAfterLast('/')
-    val directory = file.path.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
+    val directory = shortPath(file.path).substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
     Row(
         modifier = Modifier
             .fillMaxWidth()

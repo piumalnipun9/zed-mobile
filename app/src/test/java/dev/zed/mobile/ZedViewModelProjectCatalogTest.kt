@@ -90,7 +90,8 @@ class ZedViewModelProjectCatalogTest {
         assertEquals(0, repository.openProjectCalls)
         assertEquals(Page.PROJECTS, viewModel.state.value.page)
         assertNull(viewModel.state.value.project)
-        assertTrue(viewModel.state.value.error.orEmpty().contains("gateway is unavailable"))
+        // Offline, the action explains itself in a short notice instead of a page-wide error.
+        assertTrue(viewModel.state.value.toast.orEmpty().contains("Desktop is offline"))
     }
 
     @Test
@@ -132,7 +133,8 @@ class ZedViewModelProjectCatalogTest {
 
         assertEquals(Page.PROJECTS, viewModel.state.value.page)
         assertNull(viewModel.state.value.project)
-        assertTrue(viewModel.state.value.error.orEmpty().contains("Desktop connection failed."))
+        assertFalse(project.id in viewModel.state.value.expandedProjectIds)
+        assertTrue(viewModel.state.value.toast.orEmpty().contains("Desktop connection failed."))
     }
 
     @Test
@@ -171,8 +173,11 @@ class ZedViewModelProjectCatalogTest {
 
         advanceUntilIdle()
 
-        assertEquals(Page.THREADS, viewModel.state.value.page)
-        assertEquals(ready, viewModel.state.value.project)
+        // The project opens in place: it is expanded on Projects rather than a separate page.
+        assertEquals(Page.PROJECTS, viewModel.state.value.page)
+        assertEquals(ready, viewModel.state.value.projects.single())
+        assertTrue(ready.id in viewModel.state.value.expandedProjectIds)
+        assertNull(viewModel.state.value.notice)
         assertEquals(1, repository.openProjectCalls)
         assertEquals(1, repository.threadsCalls)
         assertTrue(repository.projectsCalls >= 3) // Initial pairing load plus authenticated catalog polling.

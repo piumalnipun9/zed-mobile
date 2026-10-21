@@ -6,13 +6,25 @@ import dev.zeddesktop.mobile.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class Page { PAIR, PROJECTS, THREADS, CHAT, CHANGES, SETTINGS }
+enum class Page { PAIR, PROJECTS, CHAT, CHANGES, SETTINGS }
+
+/** A thread with the project it belongs to, for lists that span projects. */
+data class RecentThread(val thread: ThreadSummary, val project: Project)
+
+/** The new-thread sheet: a null [projectId] asks for the project first, then the agent. */
+data class NewThreadRequest(val projectId: String?)
+
+internal fun isActiveThreadStatus(status: String): Boolean =
+    status == "running" || status == "waiting_for_approval"
 
 enum class TurnPhase {
     IDLE,
@@ -119,11 +131,22 @@ data class MobileState(
     /** A cached catalog may remain visible when the paired desktop cannot currently be reached. */
     val gatewayUnavailable: Boolean = false,
     val projects: List<Project> = emptyList(),
+    /** The project of the open thread. */
     val project: Project? = null,
-    val threads: List<ThreadSummary> = emptyList(),
-    /** Agents configured on desktop for [project]; empty for desktops without external agents. */
-    val agents: List<AgentInfo> = emptyList(),
-    val agentPickerVisible: Boolean = false,
+    /** Threads of each open project, keyed by project ID and loaded in the background. */
+    val projectThreads: Map<String, List<ThreadSummary>> = emptyMap(),
+    /** Agents configured on desktop per project; empty for desktops without external agents. */
+    val projectAgents: Map<String, List<AgentInfo>> = emptyMap(),
+    val expandedProjectIds: Set<String> = emptySet(),
+    /** Catalog projects this phone asked desktop to open that are still connecting. */
+    val openingProjectIds: Set<String> = emptySet(),
+    /** Threads opened on this phone, newest first, so Recents leads with what was just used. */
+    val recentThreadIds: List<String> = emptyList(),
+    val newThread: NewThreadRequest? = null,
+    /** A background refresh is running. It never blocks input or dims the screen. */
+    val refreshing: Boolean = false,
+    /** A short, self-dismissing message, e.g. when an action that already took effect is reverted. */
+    val toast: String? = null,
     val selectedThread: ThreadSummary? = null,
     val snapshot: ThreadSnapshot? = null,
     val files: List<ChangedFile> = emptyList(),
@@ -141,6 +164,29 @@ data class MobileState(
     val notice: String? = null,
     val lastUpdated: Long? = null,
 ) {
+    val threads: List<ThreadSummary> get() = project?.let { projectThreads[it.id] }.orEmpty()
+    val agents: List<AgentInfo> get() = project?.let { projectAgents[it.id] }.orEmpty()
+
+    /**
+     * Threads across open projects: ones opened on this phone first, then running or waiting
+     * threads, then the rest in desktop order.
+     */
+    val recents: List<RecentThread>
+        get() {
+            val projectsById = projects.associateBy { it.id }
+            val openedOrder = recentThreadIds.withIndex().associate { it.value to it.index }
+            return projectThreads.flatMap { (projectId, threads) ->
+                val project = projectsById[projectId] ?: return@flatMap emptyList()
+                threads.map { RecentThread(it, project) }
+            }.withIndex().sortedWith(
+                compareBy(
+                    { openedOrder[it.value.thread.id] ?: Int.MAX_VALUE },
+                    { if (isActiveThreadStatus(it.value.thread.status)) 0 else 1 },
+                    { it.index },
+                ),
+            ).map { it.value }
+        }
+
     // Existing composables read these values directly; chat mutations use the scoped state above.
     val draft: String get() = composer.draft
     val pendingMessage: PendingMessage? get() = composer.pendingMessage
@@ -202,6 +248,8 @@ class ZedViewModel(
     private var historyJob: Job? = null
     private val diffPageJobs = mutableMapOf<String, Job>()
     private val toolDetailsJobs = mutableMapOf<ToolDetailsKey, Job>()
+    private var homeJob: Job? = null
+    private val projectJobs = mutableMapOf<String, Job>()
 
     /** Existing manual host/token flow. This is retained as the v1 fallback. */
     fun pair(host: String, token: String) = task {
@@ -217,6 +265,7 @@ class ZedViewModel(
             projects = projects,
             busy = true,
         )
+        startThreadLoad(candidate, projects)
     }
 
     /** Claims a ZEDM2 QR ticket, verifies v2 access, then persists the per-device credential. */
@@ -305,37 +354,137 @@ class ZedViewModel(
         }
     }
 
-    fun openProject(project: Project) {
+    /**
+     * Expands an open project in place, or asks desktop to open a catalog project. The row shows
+     * its own "Opening" state; nothing else on screen is blocked.
+     */
+    fun toggleProject(project: Project) {
         val current = mutable.value
-        if (current.busy) return
-        if (current.gatewayUnavailable) {
-            mutable.value = current.copy(
-                error = "Desktop gateway is unavailable. Reconnect before opening a cached project.",
-            )
+        if (!project.isOpen) {
+            openProject(project)
             return
         }
-        beginChatSession()
-        task {
-            val repo = requireNotNull(repository)
-            // The catalog ID is opaque and desktop-owned. Never send a phone path or retry the POST.
-            val opened = if (project.isOpen) project else openAndAwaitProject(repo, project)
-            // Keep the catalog visible until both the desktop open and thread request have succeeded.
-            val threads = repo.threads(opened.id)
-            val agents = loadAgents(repo, opened.id)
-            mutable.value = mutable.value.copy(
-                page = Page.THREADS,
-                project = opened,
-                threads = threads,
-                agents = agents,
-                selectedThread = null,
-                snapshot = null,
-                turn = ChatTurnState(),
-                composer = ComposerState(),
-                approval = ApprovalState(),
-                configurationState = ConfigurationState(),
-                notice = if (project.isOpen) null else "Opened on Desktop. Your Agent threads are ready.",
+        val expanded = project.id in current.expandedProjectIds
+        mutable.value = current.copy(
+            expandedProjectIds = if (expanded) current.expandedProjectIds - project.id else current.expandedProjectIds + project.id,
+        )
+        if (!expanded && project.id !in current.projectThreads) {
+            repository?.let { startThreadLoad(it, listOf(project)) }
+        }
+    }
+
+    fun openProject(project: Project) {
+        val current = mutable.value
+        if (project.id in current.openingProjectIds) return
+        if (current.gatewayUnavailable) {
+            mutable.value = current.copy(toast = "Desktop is offline. Reconnect to open ${project.name}.")
+            return
+        }
+        val repo = repository ?: return
+        mutable.value = current.copy(openingProjectIds = current.openingProjectIds + project.id)
+        projectJobs[project.id] = viewModelScope.launch {
+            try {
+                // The catalog ID is opaque and desktop-owned. Never send a phone path or retry the POST.
+                val opened = if (project.isOpen) project else openAndAwaitProject(repo, project)
+                val threads = repo.threads(opened.id)
+                val agents = loadAgents(repo, opened.id)
+                if (repository !== repo) return@launch
+                val latest = mutable.value
+                mutable.value = latest.copy(
+                    projects = latest.projects.map { if (it.id == opened.id) opened else it },
+                    projectThreads = latest.projectThreads + (opened.id to threads),
+                    projectAgents = latest.projectAgents + (opened.id to agents),
+                    expandedProjectIds = latest.expandedProjectIds + opened.id,
+                    notice = null,
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (activeV2Credential != null) handleRevokedCredential()
+                else mutable.value = mutable.value.copy(toast = message(error))
+            } catch (error: Exception) {
+                if (repository === repo) {
+                    mutable.value = mutable.value.copy(toast = "Couldn't open ${project.name}. ${message(error)}")
+                }
+            } finally {
+                if (repository === repo) {
+                    mutable.value = mutable.value.copy(openingProjectIds = mutable.value.openingProjectIds - project.id)
+                }
+            }
+        }
+    }
+
+    /** Loads threads and agents of open projects without blocking input or dimming the screen. */
+    private fun startThreadLoad(repo: ZedRepository, projects: List<Project>) {
+        val open = projects.filter { it.isOpen }
+        if (open.isEmpty()) return
+        val job = viewModelScope.launch {
+            val loaded = try {
+                coroutineScope {
+                    open.map { project ->
+                        async {
+                            try {
+                                Triple(project.id, repo.threads(project.id), loadAgents(repo, project.id))
+                            } catch (error: CancellationException) {
+                                throw error
+                            } catch (error: GatewayAuthenticationException) {
+                                throw error
+                            } catch (_: Exception) {
+                                // Keep what was last shown for this project; the next refresh retries.
+                                null
+                            }
+                        }
+                    }.awaitAll().filterNotNull()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: GatewayAuthenticationException) {
+                if (activeV2Credential != null && repository === repo) handleRevokedCredential()
+                return@launch
+            }
+            if (repository !== repo) return@launch
+            val latest = mutable.value
+            mutable.value = latest.copy(
+                projectThreads = latest.projectThreads + loaded.associate { it.first to it.second },
+                projectAgents = latest.projectAgents + loaded.associate { it.first to it.third },
             )
         }
+        open.forEach { projectJobs[it.id] = job }
+    }
+
+    /** Re-reads the catalog and every open project's threads in the background. */
+    private fun refreshHome() {
+        val repo = repository ?: return
+        homeJob?.cancel()
+        mutable.value = mutable.value.copy(refreshing = true)
+        homeJob = viewModelScope.launch {
+            try {
+                val projects = repo.projects()
+                activeV2Credential?.let { saveProjectCatalog(it, projects) }
+                if (repository !== repo) return@launch
+                mutable.value = mutable.value.copy(projects = projects, gatewayUnavailable = false)
+                startThreadLoad(repo, projects)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (activeV2Credential != null) handleRevokedCredential()
+                else mutable.value = mutable.value.copy(error = message(error))
+            } catch (error: Exception) {
+                if (repository !== repo) return@launch
+                // Keep the last authenticated catalog on screen, but never treat it as live.
+                mutable.value = if (activeV2Credential != null) {
+                    mutable.value.copy(gatewayUnavailable = true)
+                } else {
+                    mutable.value.copy(error = message(error))
+                }
+            } finally {
+                if (repository === repo) mutable.value = mutable.value.copy(refreshing = false)
+            }
+        }
+    }
+
+    fun clearToast() {
+        mutable.value = mutable.value.copy(toast = null)
     }
 
     /** Older desktops have no agent list; they can still create built-in Zed Agent threads. */
@@ -381,11 +530,13 @@ class ZedViewModel(
         )
     }
 
-    fun openThread(thread: ThreadSummary) {
-        if (mutable.value.busy) return
+    fun openThread(thread: ThreadSummary, project: Project? = null) {
         beginChatSession()
         navigate(Page.CHAT)
-        mutable.value = mutable.value.copy(
+        val current = mutable.value
+        mutable.value = current.copy(
+            project = project ?: current.project,
+            recentThreadIds = listOf(thread.id) + (current.recentThreadIds - thread.id),
             selectedThread = thread,
             snapshot = null,
             turn = ChatTurnState(),
@@ -397,40 +548,77 @@ class ZedViewModel(
         // The visible chat owns the first fetch and subsequent lifecycle-aware polling.
     }
 
-    /** Asks which agent to use only when desktop has external agents configured. */
-    fun requestNewThread() {
+    /**
+     * Starts a thread. Asks for the project when several are open, and for the agent only when
+     * desktop has external agents configured for that project.
+     */
+    fun startNewThread(projectId: String? = null) {
         val current = mutable.value
-        if (current.busy || current.project == null) return
-        if (current.agents.any { !it.isNative }) {
-            mutable.value = current.copy(agentPickerVisible = true)
-        } else {
-            createThread()
+        val target = projectId ?: current.projects.filter { it.isOpen }.singleOrNull()?.id
+        when {
+            target == null -> mutable.value = current.copy(newThread = NewThreadRequest(null))
+            current.projectAgents[target].orEmpty().any { !it.isNative } ->
+                mutable.value = current.copy(newThread = NewThreadRequest(target))
+            else -> createThread(target, null)
         }
     }
 
-    fun dismissAgentPicker() {
-        mutable.value = mutable.value.copy(agentPickerVisible = false)
+    fun dismissNewThread() {
+        mutable.value = mutable.value.copy(newThread = null)
     }
 
-    /** Null [agentId] means the built-in Zed Agent. */
-    fun createThread(agentId: String? = null) {
-        val project = mutable.value.project ?: return
-        mutable.value = mutable.value.copy(agentPickerVisible = false)
-        task {
-            val thread = requireNotNull(repository).createThread(project.id, agentId)
-            beginChatSession()
-            mutable.value = mutable.value.copy(
-                page = Page.CHAT,
-                selectedThread = thread,
-                snapshot = null,
-                turn = ChatTurnState(),
-                composer = ComposerState(),
-                approval = ApprovalState(),
-                configurationState = ConfigurationState(),
-                lastUpdated = null,
-                notice = "Thread created. Send your first prompt.",
-            )
+    /**
+     * Opens the chat immediately with a placeholder thread, then swaps in the desktop's thread
+     * once created. A failure returns to Projects and says so. Null [agentId] means the Zed Agent.
+     */
+    fun createThread(projectId: String, agentId: String? = null) {
+        val current = mutable.value
+        val project = current.projects.firstOrNull { it.id == projectId } ?: return
+        val repo = repository ?: return
+        val agent = current.projectAgents[projectId].orEmpty()
+            .firstOrNull { if (agentId == null) it.isNative else it.id == agentId }
+        beginChatSession()
+        navigate(Page.CHAT)
+        mutable.value = mutable.value.copy(
+            newThread = null,
+            project = project,
+            selectedThread = ThreadSummary(id = "", title = "", status = "initializing", agent = agent),
+            snapshot = null,
+            turn = ChatTurnState(),
+            composer = ComposerState(),
+            approval = ApprovalState(),
+            configurationState = ConfigurationState(),
+            lastUpdated = null,
+        )
+        val session = chatEpoch
+        viewModelScope.launch {
+            try {
+                val thread = repo.createThread(projectId, agentId)
+                if (isCurrentChat("", session)) {
+                    val latest = mutable.value
+                    mutable.value = latest.copy(
+                        selectedThread = thread,
+                        recentThreadIds = listOf(thread.id) + latest.recentThreadIds,
+                        projectThreads = latest.projectThreads +
+                            (projectId to listOf(thread) + latest.projectThreads[projectId].orEmpty()),
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: GatewayAuthenticationException) {
+                if (activeV2Credential != null) handleRevokedCredential()
+                else failNewThread(session, message(error))
+            } catch (error: Exception) {
+                failNewThread(session, message(error))
+            }
         }
+    }
+
+    private fun failNewThread(session: Long, error: String) {
+        if (!isCurrentChat("", session)) return
+        beginChatSession()
+        navigate(Page.PROJECTS)
+        mutable.value = mutable.value.copy(selectedThread = null, toast = "Couldn't start a thread. $error")
     }
 
     fun editDraft(text: String) {
@@ -440,7 +628,7 @@ class ZedViewModel(
 
     fun send() {
         val current = mutable.value
-        val id = current.selectedThread?.id ?: return
+        val id = current.selectedThread?.id?.takeIf(String::isNotEmpty) ?: return
         val text = current.composer.draft
         if (text.isBlank() || current.turn.isActive) return
         val repo = repository ?: return
@@ -612,13 +800,6 @@ class ZedViewModel(
         refresh()
     }
 
-    fun showThreads() {
-        if (mutable.value.busy || mutable.value.project == null) return
-        if (mutable.value.page == Page.CHAT) beginChatSession()
-        navigate(Page.THREADS)
-        refresh()
-    }
-
     fun showChat() {
         if (mutable.value.busy || mutable.value.selectedThread == null) return
         navigate(Page.CHAT)
@@ -634,7 +815,7 @@ class ZedViewModel(
             Page.CHANGES -> navigate(Page.CHAT)
             Page.CHAT -> {
                 beginChatSession()
-                navigate(Page.THREADS); mutable.value =
+                navigate(Page.PROJECTS); mutable.value =
                     mutable.value.copy(
                         snapshot = null,
                         turn = ChatTurnState(),
@@ -647,10 +828,6 @@ class ZedViewModel(
                     ); refresh()
             }
 
-            Page.THREADS -> {
-                navigate(Page.PROJECTS); refresh()
-            }
-
             Page.SETTINGS -> navigate(Page.PROJECTS)
 
             else -> Unit
@@ -660,22 +837,13 @@ class ZedViewModel(
     fun refresh() {
         val current = mutable.value
         val repo = repository ?: return
+        if (current.page == Page.PROJECTS) {
+            refreshHome()
+            return
+        }
         task {
             try {
                 when (current.page) {
-                    Page.PROJECTS -> {
-                        val projects = repo.projects()
-                        activeV2Credential?.let { saveProjectCatalog(it, projects) }
-                        mutable.value = mutable.value.copy(projects = projects, gatewayUnavailable = false)
-                    }
-
-                    Page.THREADS -> {
-                        val projectId = requireNotNull(current.project).id
-                        val threads = repo.threads(projectId)
-                        val agents = loadAgents(repo, projectId)
-                        mutable.value = mutable.value.copy(threads = threads, agents = agents)
-                    }
-
                     Page.CHANGES -> {
                         val changes = repo.changesSnapshot(requireNotNull(current.selectedThread).id)
                         mutable.value = mutable.value.copy(
@@ -714,7 +882,7 @@ class ZedViewModel(
     suspend fun pollThread() {
         val current = mutable.value
         if (current.page != Page.CHAT) return
-        val id = current.selectedThread?.id ?: return
+        val id = current.selectedThread?.id?.takeIf(String::isNotEmpty) ?: return
         val repo = repository ?: return
         val version = epoch
         val session = chatEpoch
@@ -1054,7 +1222,19 @@ class ZedViewModel(
         thinkingEnabled: Boolean? = null,
         thinkingEffort: String? = null,
         clearThinkingEffort: Boolean = false,
-    ) = saveConfiguration { repo, threadId ->
+    ) = saveConfiguration(
+        optimistic = { configuration ->
+            configuration.copy(
+                model = model ?: configuration.model,
+                thinkingEnabled = thinkingEnabled ?: configuration.thinkingEnabled,
+                thinkingEffort = when {
+                    clearThinkingEffort -> null
+                    thinkingEffort != null -> thinkingEffort
+                    else -> configuration.thinkingEffort
+                },
+            )
+        },
+    ) { repo, threadId ->
         repo.updateConfiguration(
             id = threadId,
             model = model,
@@ -1064,24 +1244,48 @@ class ZedViewModel(
         )
     }
 
-    fun setAgentMode(modeId: String) = saveConfiguration { repo, threadId ->
+    fun setAgentMode(modeId: String) = saveConfiguration(
+        optimistic = { configuration -> configuration.copy(modes = configuration.modes?.copy(current = modeId)) },
+    ) { repo, threadId ->
         repo.setAgentMode(threadId, modeId)
     }
 
-    fun setAgentOption(optionId: String, value: AgentOptionValue) = saveConfiguration { repo, threadId ->
+    fun setAgentOption(optionId: String, value: AgentOptionValue) = saveConfiguration(
+        optimistic = { configuration ->
+            configuration.copy(
+                options = configuration.options.map { option ->
+                    when {
+                        option.id != optionId -> option
+                        value is AgentOptionValue.Choice -> option.copy(currentValue = value.value)
+                        value is AgentOptionValue.Toggle -> option.copy(currentBoolean = value.value)
+                        else -> option
+                    }
+                },
+            )
+        },
+    ) { repo, threadId ->
         repo.setAgentOption(threadId, optionId, value)
     }
 
-    private fun saveConfiguration(save: suspend (ZedRepository, String) -> ThreadConfiguration) {
+    /**
+     * Shows [optimistic] at once, so a choice looks selected the moment it is tapped. If desktop
+     * rejects it, the previous configuration comes back with a short notice.
+     */
+    private fun saveConfiguration(
+        optimistic: (ThreadConfiguration) -> ThreadConfiguration,
+        save: suspend (ZedRepository, String) -> ThreadConfiguration,
+    ) {
         val current = mutable.value
-        val threadId = current.selectedThread?.id ?: return
+        val threadId = current.selectedThread?.id?.takeIf(String::isNotEmpty) ?: return
         if (current.turn.isActive || current.configurationState.isSavingConfiguration) return
         val repo = repository ?: return
         val session = chatEpoch
         val revision = ++configurationRevision
+        val previous = current.configurationState.configuration
 
         mutable.value = current.copy(
             configurationState = current.configurationState.copy(
+                configuration = previous?.let(optimistic),
                 isSavingConfiguration = true,
                 error = null,
             ),
@@ -1109,10 +1313,10 @@ class ZedViewModel(
                 if (isCurrentChat(threadId, session) && activeV2Credential != null) {
                     handleRevokedCredential()
                 } else {
-                    markConfigurationFailed(threadId, session, revision, message(error))
+                    markConfigurationFailed(threadId, session, revision, previous, message(error))
                 }
             } catch (error: Exception) {
-                markConfigurationFailed(threadId, session, revision, message(error))
+                markConfigurationFailed(threadId, session, revision, previous, message(error))
             }
         }
     }
@@ -1219,19 +1423,26 @@ class ZedViewModel(
             }
         }
 
-    private fun markConfigurationFailed(threadId: String, session: Long, revision: Long, error: String) =
-        updateCurrentChat(threadId, session) { latest ->
-            if (configurationRevision != revision) {
-                latest
-            } else {
-                latest.copy(
-                    configurationState = latest.configurationState.copy(
-                        isSavingConfiguration = false,
-                        error = error,
-                    ),
-                )
-            }
+    private fun markConfigurationFailed(
+        threadId: String,
+        session: Long,
+        revision: Long,
+        previous: ThreadConfiguration?,
+        error: String,
+    ) = updateCurrentChat(threadId, session) { latest ->
+        if (configurationRevision != revision) {
+            latest
+        } else {
+            latest.copy(
+                configurationState = latest.configurationState.copy(
+                    configuration = previous,
+                    isSavingConfiguration = false,
+                    error = error,
+                ),
+                toast = "Couldn't change that setting, so it was put back. $error",
+            )
         }
+    }
 
     private fun markToolDetailsFailed(
         threadId: String,
@@ -1412,6 +1623,7 @@ class ZedViewModel(
             saveProjectCatalog(credential, projects)
             if (activeV2Credential == credential) {
                 mutable.value = mutable.value.copy(projects = projects, gatewayUnavailable = false)
+                startThreadLoad(candidate, projects)
             }
         } catch (error: CancellationException) {
             throw error

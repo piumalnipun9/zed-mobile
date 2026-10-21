@@ -40,19 +40,85 @@ class ScreenshotTest {
         compose.onRoot().captureRoboImage("build/outputs/roborazzi/$name.png")
     }
 
-    @Test
-    fun projects() = render(
-        "01_projects",
-        MobileState(
-            page = Page.PROJECTS,
-            host = "100.99.221.90:7331",
-            hasPersistentPairing = true,
-            projects = listOf(
-                project,
-                Project("p2", "tonic", "/work/rpc/tonic"),
-                Project("p3", "anthropic-sdk", "/dev/ai/sdk", isOpen = false, kind = PROJECT_KIND_SSH, connectionName = "arch-box"),
+    private val tonic = Project("p2", "tonic", "/home/dev/rpc/tonic")
+    private val remote = Project("p3", "inference-server", "/srv/inference", isOpen = false, kind = PROJECT_KIND_SSH, connectionName = "gpu-box")
+    private val claude = AgentInfo("claude-acp", "Claude Agent", isNative = false)
+    private val agents = listOf(AgentInfo("Zed Agent", "Zed Agent", isNative = true), claude, AgentInfo("gemini", "Gemini CLI", isNative = false))
+
+    private fun homeState() = MobileState(
+        page = Page.PROJECTS,
+        host = "http://100.99.221.90:7331",
+        hasPersistentPairing = true,
+        projects = listOf(project, tonic, remote),
+        projectThreads = linkedMapOf(
+            project.id to listOf(
+                thread,
+                ThreadSummary("t2", "Port the SSE client to OkHttp", "running", agent = claude),
+                ThreadSummary("t3", "Refactor tree-sitter highlight queries", "idle"),
             ),
+            tonic.id to listOf(ThreadSummary("t4", "Investigate streaming backpressure", THREAD_STATUS_NEEDS_AUTHENTICATION, agent = agents[2])),
         ),
+        projectAgents = mapOf(project.id to agents),
+        expandedProjectIds = setOf(project.id),
+    )
+
+    @Test
+    @Config(qualifiers = "w412dp-h1200dp-xxhdpi")
+    fun home() = render("01_home", homeState())
+
+    @Test
+    fun homeDisconnected() = render(
+        "01b_home_disconnected",
+        homeState().copy(gatewayUnavailable = true, expandedProjectIds = emptySet()),
+    )
+
+    @Test
+    fun homeEmpty() = render(
+        "01c_home_empty",
+        MobileState(page = Page.PROJECTS, host = "http://100.99.221.90:7331", hasPersistentPairing = true),
+    )
+
+    /** Sheets and toasts draw in their own windows or overlays, so these capture the screen. */
+    @OptIn(ExperimentalRoborazziApi::class)
+    private fun renderScreen(name: String, state: MobileState) {
+        compose.setContent { ZedTheme { ZedAppContent(state = state, vm = vm) } }
+        compose.waitForIdle()
+        captureScreenRoboImage("build/outputs/roborazzi/$name.png")
+    }
+
+    @Test
+    fun newThreadAgentSheet() = renderScreen("01d_new_thread_agent", homeState().copy(newThread = NewThreadRequest(project.id)))
+
+    @Test
+    fun newThreadProjectSheet() = renderScreen("01e_new_thread_project", homeState().copy(newThread = NewThreadRequest(null)))
+
+    @Test
+    fun drawer() {
+        compose.setContent {
+            ZedTheme {
+                MobileNavigationDrawer(
+                    state = homeState().copy(recentThreadIds = listOf("t2")),
+                    onDestination = {},
+                    onOpenRecent = {},
+                )
+            }
+        }
+        compose.onRoot().captureRoboImage("build/outputs/roborazzi/01f_drawer.png")
+    }
+
+    @Test
+    fun failureToast() = renderScreen("01g_toast", homeState().copy(toast = "Couldn't change that setting, so it was put back. Desktop is offline."))
+
+    @Test
+    fun chatFirstLoad() = render(
+        "02e_chat_loading",
+        chatState(transcript = emptyList(), phase = TurnPhase.IDLE).copy(snapshot = null),
+    )
+
+    @Test
+    fun chatEmptyThread() = render(
+        "02f_chat_empty",
+        chatState(transcript = emptyList(), phase = TurnPhase.IDLE),
     )
 
     @Test
@@ -165,52 +231,6 @@ class ScreenshotTest {
 
     @Test
     fun pairing() = render("00_pair", MobileState(page = Page.PAIR))
-
-    @Test
-    fun threads() = render(
-        "01b_threads",
-        MobileState(
-            page = Page.THREADS,
-            host = "100.99.221.90:7331",
-            project = project,
-            threads = listOf(
-                thread,
-                ThreadSummary("t2", "Fix race condition in terminal PTY reader", "running"),
-                ThreadSummary("t3", "Refactor tree-sitter highlight queries", "completed"),
-                ThreadSummary("t4", "Investigate Wayland fractional scaling", "idle"),
-            ),
-        ),
-    )
-
-    private val claude = AgentInfo("claude-acp", "Claude Agent", isNative = false)
-    private val agents = listOf(AgentInfo("Zed Agent", "Zed Agent", isNative = true), claude, AgentInfo("gemini", "Gemini CLI", isNative = false))
-
-    /** The agent picker is a bottom sheet in its own window, so this captures every window. */
-    @OptIn(ExperimentalRoborazziApi::class)
-    @Test
-    fun threadsWithExternalAgents() {
-        compose.setContent {
-            ZedTheme {
-                ZedAppContent(
-                    state = MobileState(
-                        page = Page.THREADS,
-                        host = "100.99.221.90:7331",
-                        project = project,
-                        agents = agents,
-                        agentPickerVisible = true,
-                        threads = listOf(
-                            thread,
-                            ThreadSummary("t2", "Port the SSE client to OkHttp", "running", agent = claude),
-                            ThreadSummary("t3", "Review the gateway threat model", THREAD_STATUS_NEEDS_AUTHENTICATION, agent = agents[2]),
-                        ),
-                    ),
-                    vm = vm,
-                )
-            }
-        }
-        compose.waitForIdle()
-        captureScreenRoboImage("build/outputs/roborazzi/01c_threads_agent_picker.png")
-    }
 
     @Test
     fun externalAgentNeedsSignIn() = render(

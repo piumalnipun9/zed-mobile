@@ -12,6 +12,11 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -76,11 +81,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.markdownPadding
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -123,12 +128,6 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
     }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val nearBottom by remember {
-        derivedStateOf {
-            listState.layoutInfo.totalItemsCount == 0 ||
-                (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= listState.layoutInfo.totalItemsCount - 2
-        }
-    }
     // Rows before the transcript (the "load earlier" row) shift item positions in the list.
     val leadingItems = if (hasRichTranscript && state.olderTranscriptEntries > 0) 1 else 0
     val offscreenApproval by remember(state.approvals, inlineApprovalIndexes, listState, leadingItems) {
@@ -142,8 +141,6 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
         }
     }
     var showConfiguration by rememberSaveable(threadId) { mutableStateOf(false) }
-    var showActions by rememberSaveable(threadId) { mutableStateOf(false) }
-    var showContextInfo by rememberSaveable(threadId) { mutableStateOf(false) }
     val openConfiguration = {
         if (!usesExternalAgent(state)) vm.loadModels()
         showConfiguration = true
@@ -153,20 +150,36 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
     // entries (this effect runs in the same frame they arrive) and land at the very bottom of the
     // last item, so a long final reply is not cut off.
     val loadedItems = if (hasRichTranscript) transcript.size + leadingItems else messages.size
+    // The transcript stays invisible until it is already positioned at its end, so opening a long
+    // thread never shows the top first and then a fast scroll.
     var openedAtEnd by remember(threadId) { mutableStateOf(false) }
     LaunchedEffect(threadId, loadedItems > 0) {
         if (openedAtEnd || loadedItems == 0) return@LaunchedEffect
-        val count = snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it >= loadedItems }
-        listState.scrollToItem(count - 1, Int.MAX_VALUE)
+        snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it >= loadedItems }
+        listState.scrollToEnd(animated = false)
         openedAtEnd = true
     }
-
-    LaunchedEffect(transcript.size, messages.size, state.pendingMessage?.localId, state.turnPhase, state.approvals.size, state.snapshot?.id) {
-        if (openedAtEnd && nearBottom && listState.layoutInfo.totalItemsCount > 0) {
-            withFrameNanos { }
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+    // Follow new output while the reader is at the end; scrolling up pauses following.
+    var followEnd by remember(threadId) { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }.collect { (scrolling, canScrollForward) ->
+            if (scrolling) followEnd = !canScrollForward
         }
     }
+    LaunchedEffect(transcript.size, transcript.lastOrNull()?.chunks?.sumOf { it.text.length }, messages.size, state.turnPhase, state.approvals.size) {
+        if (openedAtEnd && followEnd) {
+            withFrameNanos { }
+            listState.scrollToEnd()
+        }
+    }
+    // Sending always returns to the end, where the new message appears.
+    LaunchedEffect(state.pendingMessage?.localId) {
+        if (state.pendingMessage == null) return@LaunchedEffect
+        followEnd = true
+        withFrameNanos { }
+        listState.scrollToEnd()
+    }
+    val showJumpToEnd by remember { derivedStateOf { listState.canScrollForward } }
 
     Column(modifier = Modifier.fillMaxSize()) {
         state.pollError?.let { InlineNotice("Can't refresh this thread · $it", error = true) }
@@ -177,9 +190,12 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
             )
             "error" -> state.snapshot?.errorMessage?.let { InlineNotice(it, error = true) }
         }
+        Box(modifier = Modifier.weight(1f)) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .fillMaxSize()
+                .alpha(if (openedAtEnd || loadedItems == 0) 1f else 0f),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -211,16 +227,7 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
                     )
                 }
             } else if (messages.isEmpty() && state.approvals.isEmpty() && state.pendingMessage == null) {
-                item {
-                    EmptyState(
-                        title = if (state.snapshot == null) "Connecting…" else "What should ${agentName(state)} work on?",
-                        detail = if (state.snapshot == null) {
-                            "Messages appear here when desktop Zed responds."
-                        } else {
-                            "Send a prompt to start this thread."
-                        },
-                    )
-                }
+                // The mascot overlay below covers the loading and empty states.
             } else {
                 itemsIndexed(messages, key = { index, message -> "message:$index:${message.role}:${message.text.hashCode()}" }) { _, message ->
                     if (message.role.equals("user", ignoreCase = true)) UserMessage(message.text) else AssistantText(message.text)
@@ -259,6 +266,48 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
                 }
             }
         }
+        val firstLoad = state.snapshot == null && state.pendingMessage == null
+        val emptyThread = !firstLoad && !hasRichTranscript && messages.isEmpty() &&
+            state.approvals.isEmpty() && state.pendingMessage == null
+        when {
+            firstLoad -> MascotMessage(
+                title = if (state.selectedThread?.id.isNullOrEmpty()) "Starting a new thread…" else "Opening thread…",
+                detail = "Getting the latest from ${state.project?.name ?: "your desktop"}",
+                mood = MascotMood.Working,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            emptyThread -> MascotMessage(
+                title = "What should we build?",
+                detail = "Ask ${agentName(state)} to fix a bug, explain code, or make a change in ${state.project?.name ?: "this project"}.",
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        androidx.compose.animation.AnimatedVisibility(
+            visible = openedAtEnd && showJumpToEnd && !followEnd,
+            enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
+            exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 12.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .shadow(4.dp, CircleShape)
+                    .clip(CircleShape)
+                    .background(ZedColors.Surface)
+                    .border(1.dp, ZedColors.Hairline, CircleShape)
+                    .clickable {
+                        followEnd = true
+                        scope.launch { listState.scrollToEnd() }
+                    }
+                    .semantics { contentDescription = "Jump to latest" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Symbols.ArrowDown, contentDescription = null, tint = ZedColors.Text, modifier = Modifier.size(18.dp))
+            }
+        }
+        }
         offscreenApproval?.let { approval ->
             ApprovalJumpBar(approval) {
                 inlineApprovalIndexes[approval.toolCallId]?.let { index ->
@@ -270,31 +319,10 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
             state = state,
             vm = vm,
             onConfigure = openConfiguration,
-            onMore = { showActions = true },
         )
     }
 
     if (showConfiguration) ThreadConfigurationSheet(state, vm) { showConfiguration = false }
-    if (showActions) {
-        ComposerActionsSheet(
-            changesLabel = changesLabel(state),
-            configureLabel = if (usesExternalAgent(state)) "Agent settings" else "Model and thinking",
-            onDismiss = { showActions = false },
-            onConfigure = {
-                showActions = false
-                openConfiguration()
-            },
-            onShowChanges = {
-                showActions = false
-                vm.showChanges()
-            },
-            onAddContext = {
-                showActions = false
-                showContextInfo = true
-            },
-        )
-    }
-    if (showContextInfo) ContextUnavailableSheet { showContextInfo = false }
 }
 
 @Composable
@@ -388,6 +416,8 @@ private fun AssistantText(text: String) {
         Markdown(
             content = text,
             modifier = Modifier.fillMaxWidth(),
+            // Paragraphs and list items need air between them to read as separate thoughts.
+            padding = markdownPadding(block = 10.dp, listItemBottom = 4.dp),
             colors = markdownColor(
                 text = ZedColors.Text,
                 codeText = ZedColors.Text,
@@ -410,8 +440,8 @@ private fun AssistantText(text: String) {
                 bullet = body,
                 list = body,
                 quote = body.copy(color = ZedColors.Muted),
-                code = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                inlineCode = body.copy(fontFamily = FontFamily.Monospace),
+                code = MaterialTheme.typography.bodyMedium.copy(fontFamily = MonoFamily),
+                inlineCode = body.copy(fontFamily = MonoFamily),
             ),
         )
     }
@@ -419,16 +449,17 @@ private fun AssistantText(text: String) {
 
 @Composable
 private fun PendingMessage(pending: PendingMessage) {
+    // A sent message looks like any other at once; only a failure is labelled.
+    if (pending.status != PendingMessageStatus.FAILED) {
+        UserMessage(pending.text)
+        return
+    }
     UserMessage(pending.text) {
         Text(
-            when (pending.status) {
-                PendingMessageStatus.SENDING -> "Sending…"
-                PendingMessageStatus.SENT -> "Sent"
-                PendingMessageStatus.FAILED -> pending.error?.let { "Not sent · $it" } ?: "Not sent"
-            },
+            pending.error?.let { "Not sent · $it" } ?: "Not sent. Your text is back in the box.",
             modifier = Modifier.padding(top = 4.dp, end = 4.dp),
             style = MaterialTheme.typography.bodySmall,
-            color = if (pending.status == PendingMessageStatus.FAILED) ZedColors.Danger else ZedColors.Faint,
+            color = ZedColors.Danger,
             textAlign = TextAlign.End,
         )
     }
@@ -467,7 +498,7 @@ private fun ThinkingIndicator(label: String) {
         Icon(
             Symbols.Asterisk,
             contentDescription = null,
-            tint = ZedColors.Accent,
+            tint = ZedColors.Brand,
             modifier = Modifier
                 .size(18.dp)
                 .graphicsLayer {
@@ -1049,7 +1080,7 @@ private fun ApprovalJumpBar(approval: ToolApproval, onClick: () -> Unit) {
 }
 
 @Composable
-private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Unit, onMore: () -> Unit) {
+private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Unit) {
     val turnActive = state.turn.isActive
     val canSend = !state.busy && !turnActive && state.draft.isNotBlank()
     val canStop = !state.busy && turnActive && state.turn.canCancel
@@ -1096,12 +1127,9 @@ private fun Composer(state: MobileState, vm: ZedViewModel, onConfigure: () -> Un
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 6.dp, end = 8.dp, bottom = 6.dp),
+                    .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onMore, enabled = !state.busy, modifier = Modifier.size(36.dp)) {
-                    Icon(Symbols.Add, contentDescription = "Thread actions", tint = ZedColors.Muted, modifier = Modifier.size(20.dp))
-                }
                 Row(
                     modifier = Modifier
                         .clip(MaterialTheme.shapes.small)
@@ -1203,9 +1231,9 @@ private fun ThreadConfigurationSheet(state: MobileState, vm: ZedViewModel, onDis
     }
     val configuration = state.configuration
     val selectedModel = configuration?.model
-    val canChange = !state.isSavingConfiguration && !state.turn.isActive
+    val canChange = !state.turn.isActive
     QuietSheet(onDismiss, "Model") {
-        if (state.isLoadingModels || state.isSavingConfiguration) {
+        if (state.isLoadingModels && state.models.isEmpty()) {
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1215,7 +1243,6 @@ private fun ThreadConfigurationSheet(state: MobileState, vm: ZedViewModel, onDis
                 trackColor = ZedColors.Hairline,
             )
         }
-        state.configurationState.error?.let { InlineNotice(it, error = true) }
         if (state.turn.isActive) InlineNotice("You can change the model after this turn finishes.")
         when {
             state.isLoadingModels && state.models.isEmpty() -> InlineNotice("Loading models from desktop…")
@@ -1291,20 +1318,9 @@ private fun ThreadConfigurationSheet(state: MobileState, vm: ZedViewModel, onDis
 @Composable
 private fun ExternalAgentConfigurationSheet(state: MobileState, vm: ZedViewModel, onDismiss: () -> Unit) {
     val configuration = state.configuration
-    val canChange = !state.isSavingConfiguration && !state.turn.isActive
+    val canChange = !state.turn.isActive
     val modes = configuration?.modes?.takeIf { it.available.isNotEmpty() }
     QuietSheet(onDismiss, agentName(state)) {
-        if (state.isSavingConfiguration) {
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp)
-                    .height(1.dp),
-                color = ZedColors.Text,
-                trackColor = ZedColors.Hairline,
-            )
-        }
-        state.configurationState.error?.let { InlineNotice(it, error = true) }
         if (state.turn.isActive) InlineNotice("You can change these settings after this turn finishes.")
         when {
             configuration == null -> InlineNotice("Loading settings from desktop…")
@@ -1375,50 +1391,6 @@ private fun AgentChoiceRow(title: String, subtitle: String?, selected: Boolean, 
     )
 }
 
-@Composable
-private fun ComposerActionsSheet(
-    changesLabel: String,
-    configureLabel: String,
-    onDismiss: () -> Unit,
-    onConfigure: () -> Unit,
-    onShowChanges: () -> Unit,
-    onAddContext: () -> Unit,
-) {
-    QuietSheet(onDismiss, "Thread") {
-        SheetAction(Symbols.Tune, configureLabel, onConfigure)
-        SheetAction(Symbols.Description, changesLabel, onShowChanges)
-        SheetAction(Symbols.AttachFile, "Add context", onAddContext)
-    }
-}
-
-@Composable
-private fun SheetAction(icon: ImageVector, label: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .heightIn(min = 52.dp)
-            .padding(horizontal = 20.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Icon(icon, contentDescription = null, tint = ZedColors.Muted, modifier = Modifier.size(20.dp))
-        Text(label, style = MaterialTheme.typography.bodyLarge)
-    }
-}
-
-@Composable
-private fun ContextUnavailableSheet(onDismiss: () -> Unit) {
-    QuietSheet(onDismiss, "Add context") {
-        Text(
-            "Attachments aren't available from the phone yet. For safety, Zed Mobile never sends device files or paths to desktop. Add files from the desktop workspace instead.",
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            color = ZedColors.Muted,
-        )
-    }
-}
-
 internal fun changesLabel(state: MobileState): String =
     state.files.takeIf { it.isNotEmpty() }?.let { "Changes · ${it.size}" } ?: "Changes"
 
@@ -1460,4 +1432,19 @@ private fun isThoughtKind(kind: String): Boolean = kind.contains("thought") || k
 private fun transcriptTextBlocks(entry: TranscriptEntry): List<String> = buildList {
     entry.text?.takeIf { it.isNotEmpty() }?.let(::add)
     entry.chunks.forEach { if (it.text.isNotEmpty()) add(it.text) }
+}
+
+/**
+ * Scrolls to the very bottom of the last item, so a long final reply is not left cut off at its
+ * top edge the way scrolling to the item alone would.
+ */
+internal suspend fun LazyListState.scrollToEnd(animated: Boolean = true) {
+    val last = layoutInfo.totalItemsCount - 1
+    if (last < 0) return
+    if (animated) animateScrollToItem(last) else scrollToItem(last)
+    val item = layoutInfo.visibleItemsInfo.lastOrNull { it.index == last } ?: return
+    val overflow = item.offset + item.size - (layoutInfo.viewportEndOffset - layoutInfo.afterContentPadding)
+    if (overflow > 0) {
+        if (animated) animateScrollBy(overflow.toFloat()) else scrollBy(overflow.toFloat())
+    }
 }
