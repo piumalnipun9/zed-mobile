@@ -30,7 +30,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -320,7 +319,7 @@ internal fun MobileNavigationDrawer(
                 Mascot(size = 30.dp)
                 Text("Zed", style = MaterialTheme.typography.headlineSmall)
             }
-            DrawerItem(Symbols.Folder, "Projects", state.page == Page.PROJECTS) { onDestination(Page.PROJECTS) }
+            DrawerItem(Symbols.Projects, "Projects", state.page == Page.PROJECTS) { onDestination(Page.PROJECTS) }
             DrawerItem(Symbols.Settings, "Settings", state.page == Page.SETTINGS) { onDestination(Page.SETTINGS) }
             Hairline(modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
             val recents = state.recents
@@ -354,7 +353,10 @@ internal fun MobileNavigationDrawer(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        ProjectTag(recent.project.name, modifier = Modifier.widthIn(max = 96.dp))
+                        // A fixed column so every tag starts at the same point, whatever the title length.
+                        Box(modifier = Modifier.width(76.dp)) {
+                            ProjectTag(recent.project.name)
+                        }
                     }
                 }
             }
@@ -379,7 +381,7 @@ private fun DrawerItem(icon: ImageVector, label: String, selected: Boolean, onCl
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Icon(icon, contentDescription = null, tint = ZedColors.Text, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = null, tint = ZedColors.Text, modifier = Modifier.size(18.dp))
         Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }

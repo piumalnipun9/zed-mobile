@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A tray with two stacked sheets above it, matching the Claude app's Projects icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path android:pathData="M8 3.5h8M6 7h12M4.5 10.5h15v7a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3Z" android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="1.75" android:strokeLineCap="round" android:strokeLineJoin="round" />
+</vector>

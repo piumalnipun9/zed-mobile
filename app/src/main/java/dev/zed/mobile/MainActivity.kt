@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -27,7 +28,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
             val vm: ZedViewModel = viewModel()
             val scanner = remember { AndroidQrCodeScanner(this@MainActivity) }
             LaunchedEffect(Unit) {
-                consumeDebugPairingQr()?.let { vm.pairQr(it) }
+                consumeDebugPairingQr()?.let { vm.pairQr(it, phoneLabel()) }
             }
             val scope = rememberCoroutineScope()
             var scanning by remember { mutableStateOf(false) }
@@ -110,7 +110,7 @@ class MainActivity : ComponentActivity() {
                                 try {
                                     val qrValue = scanner.scan()
                                     scannerFeedback = "QR code scanned. Pairing this device…"
-                                    vm.pairQr(qrValue)
+                                    vm.pairQr(qrValue, phoneLabel())
                                 } catch (_: CancellationException) {
                                     scannerFeedback =
                                         "Scan cancelled. You can scan the pairing code when you are ready."
@@ -277,3 +277,16 @@ fun ZedApp(
 }
 
 private const val DEBUG_PAIRING_QR_EXTRA = "dev.zed.mobile.DEBUG_PAIRING_QR"
+
+/**
+ * How this phone appears in Zed's paired devices list: the name the user gave the phone, or its
+ * maker and model when no name is set.
+ */
+private fun Activity.phoneLabel(): String {
+    val name = runCatching { Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) }.getOrNull()
+    val model = Build.MODEL.orEmpty()
+    val maker = Build.MANUFACTURER.orEmpty().replaceFirstChar { it.uppercase() }
+    val label = name?.takeIf { it.isNotBlank() }
+        ?: if (model.startsWith(maker, ignoreCase = true)) model else "$maker $model".trim()
+    return label.filter { !it.isISOControl() }.take(128).ifBlank { "Zed Mobile" }
+}

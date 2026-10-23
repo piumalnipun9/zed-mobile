@@ -151,7 +151,7 @@ class GatewayEventService : Service() {
         }
         val notificationId = nextNotificationId()
         val notification = Notification.Builder(this, EVENT_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_zed)
+            .setSmallIcon(R.drawable.ic_stat_mascot)
             .setContentTitle(title)
             .setContentText("${event.projectName} · ${event.threadTitle}")
             .setStyle(
@@ -181,7 +181,7 @@ class GatewayEventService : Service() {
 
     private fun startAsForeground() {
         val notification = Notification.Builder(this, CONNECTION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_zed)
+            .setSmallIcon(R.drawable.ic_stat_mascot)
             .setContentTitle("Connected to Zed-Desktop for Agent updates")
             .setContentText("Listening directly to your paired desktop.")
             .setContentIntent(appContentIntent())

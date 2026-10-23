@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Notification silhouette of the mascot; the eyes are cut out so it reads at small sizes. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="196"
+    android:viewportHeight="196">
+    <group android:translateY="31">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M14,0H182V52H196V80H182V112H154V134H140V112H56V134H42V112H14V80H0V52H14ZM66,40a9,9 0 0 0 -9,9v8a9,9 0 0 0 18,0v-8a9,9 0 0 0 -9,-9ZM130,40a9,9 0 0 0 -9,9v8a9,9 0 0 0 18,0v-8a9,9 0 0 0 -9,-9Z" />
+    </group>
+</vector>

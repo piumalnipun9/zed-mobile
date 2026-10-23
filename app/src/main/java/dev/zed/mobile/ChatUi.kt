@@ -48,7 +48,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -169,7 +168,10 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
     LaunchedEffect(transcript.size, transcript.lastOrNull()?.chunks?.sumOf { it.text.length }, messages.size, state.turnPhase, state.approvals.size) {
         if (openedAtEnd && followEnd) {
             withFrameNanos { }
-            listState.scrollToEnd()
+            // Only animate short steps. A long way from the end (for example when the full
+            // transcript replaces the first partial one) an animated scroll would flash through the
+            // whole thread, so land at the end directly.
+            listState.scrollToEnd(animated = listState.isNearEnd())
         }
     }
     // Sending always returns to the end, where the new message appears.
@@ -299,7 +301,7 @@ internal fun ChatScreen(state: MobileState, vm: ZedViewModel) {
                     .border(1.dp, ZedColors.Hairline, CircleShape)
                     .clickable {
                         followEnd = true
-                        scope.launch { listState.scrollToEnd() }
+                        scope.launch { listState.glideToEnd() }
                     }
                     .semantics { contentDescription = "Jump to latest" },
                 contentAlignment = Alignment.Center,
@@ -1438,6 +1440,27 @@ private fun transcriptTextBlocks(entry: TranscriptEntry): List<String> = buildLi
  * Scrolls to the very bottom of the last item, so a long final reply is not left cut off at its
  * top edge the way scrolling to the item alone would.
  */
+private fun LazyListState.isNearEnd(): Boolean {
+    val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return true
+    return layoutInfo.totalItemsCount - 1 - lastVisible <= 1
+}
+
+/**
+ * Scrolls smoothly down from where the reader is, a few screens per step, instead of
+ * `animateScrollToItem`, which jumps near the target first and then animates the rest.
+ */
+internal suspend fun LazyListState.glideToEnd() {
+    val viewport = (layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset).toFloat().coerceAtLeast(1f)
+    repeat(MAX_GLIDE_STEPS) {
+        if (!canScrollForward) return
+        animateScrollBy(viewport * 2, tween(durationMillis = 220, easing = LinearEasing))
+    }
+    // Very long threads: finish without animating through the remaining screens.
+    scrollToEnd(animated = false)
+}
+
+private const val MAX_GLIDE_STEPS = 12
+
 internal suspend fun LazyListState.scrollToEnd(animated: Boolean = true) {
     val last = layoutInfo.totalItemsCount - 1
     if (last < 0) return

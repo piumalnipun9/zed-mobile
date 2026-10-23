@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="zed_primary">#884C39</color>
+    <color name="zed_primary">#6E56CF</color>
     <color name="zed_surface">#FFF8F6</color>
     <color name="zed_on_surface">#211A18</color>
+    <color name="launcher_background">#F1EEFB</color>
 </resources>

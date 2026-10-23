@@ -26,7 +26,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -376,12 +375,12 @@ private fun ProjectEntry(state: MobileState, project: Project, vm: ZedViewModel)
         Icon(
             when {
                 remote -> Symbols.Dns
-                expanded -> Symbols.FolderOpenFilled
+                expanded -> Symbols.FolderOpen
                 else -> Symbols.Folder
             },
             contentDescription = null,
-            tint = ZedColors.Text,
-            modifier = Modifier.size(22.dp),
+            tint = ZedColors.Muted,
+            modifier = Modifier.size(18.dp),
         )
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(project.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -448,7 +447,7 @@ private fun ProjectEntry(state: MobileState, project: Project, vm: ZedViewModel)
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(Symbols.Add, contentDescription = null, tint = ZedColors.AccentText, modifier = Modifier.size(16.dp))
+                Icon(Symbols.Add, contentDescription = null, tint = ZedColors.Text, modifier = Modifier.size(16.dp))
                 Text("New thread", style = MaterialTheme.typography.labelLarge, color = ZedColors.AccentText)
             }
         }

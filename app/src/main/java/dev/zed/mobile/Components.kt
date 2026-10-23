@@ -27,7 +27,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -361,7 +360,8 @@ internal object Symbols {
     val ExpandLess: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_chevron_up)
     val ExpandMore: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_chevron_down)
     val Folder: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_folder)
-    val FolderOpenFilled: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.ms_folder_open_filled)
+    val Projects: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_projects_stack)
+    val FolderOpen: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_folder_open)
     val Laptop: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_laptop)
     val LaptopOff: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_laptop_off)
     val Logout: ImageVector @Composable get() = ImageVector.vectorResource(R.drawable.lc_log_out)
