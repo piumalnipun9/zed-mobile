@@ -607,6 +607,18 @@ private fun ThoughtView(text: String, thoughtKey: String, active: Boolean) {
     }
 }
 
+/**
+ * Zed's built-in agent sends terminal choices as allow/deny pairs that share one label ("Only this
+ * time", "Always for terminal"), because the desktop shows that label in a dropdown beside separate
+ * Allow and Deny buttons. Listed one per row, the pair would read identically, so name the action.
+ */
+internal fun optionLabel(option: PermissionChoice, all: List<PermissionChoice>): String {
+    val shared = all.count { it.label == option.label } > 1
+    if (!shared) return option.label
+    val action = if (option.allows) "Allow" else "Deny"
+    return "$action ${option.label.replaceFirstChar { it.lowercase() }}"
+}
+
 @Composable
 private fun toolStatusIcon(status: String?): Pair<ImageVector?, Color> {
     val value = status.orEmpty().lowercase()
@@ -768,7 +780,7 @@ private fun ApprovalPanel(
                 val scope = if (option.isAlways && checkedPatterns.isNotEmpty()) " (selected patterns)" else ""
                 OptionRow(
                     number = index + 1,
-                    label = option.label + scope,
+                    label = optionLabel(option, approval.options) + scope,
                     danger = !option.allows,
                     enabled = !resolving && option.enabled,
                 ) {
