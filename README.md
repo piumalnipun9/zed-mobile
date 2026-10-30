@@ -4,6 +4,12 @@ Zed Mobile is a focused Android companion for the local `Zed-Desktop` fork. On a
 
 It intentionally does **not** expose a general filesystem, terminal, shell, or remote desktop interface.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="Zed Mobile demo: start a Zed Agent thread, send a prompt, answer the Agent's question, approve a test run, and keep the edits" width="300">
+</p>
+
+<p align="center"><sub>Starting a thread, answering the Agent's question, approving <code>cargo test</code>, and keeping the edits (2× speed).</sub></p>
+
 ## Pairing and security
 
 - Pairing is QR-first. In Zed-Desktop open **Settings → Mobile Gateway → Connect mobile device**, then scan the time-limited QR code from this app.
